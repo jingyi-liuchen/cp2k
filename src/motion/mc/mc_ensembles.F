@@ -572,14 +572,20 @@ CONTAINS
                                molecule_type_switch1, molecule_type_switch2, &
                                box_number, nnstep, rng_stream)
 
-            ! need to sync the coordinates between force_env & bias_env
             IF (lbias) THEN
+               ! need to sync the coordinates between force_env & bias_env
                CALL force_env_get(bias_env(box_number)%force_env, subsys=biassys)
                CALL cp_subsys_get(biassys, particles=particles_bias)
                DO iparticle = 1, nunits_tot(box_number)
                   particles_bias%els(iparticle)%r(1:3) = r_old(1:3, iparticle, box_number)
                ENDDO
+               ! update energy of bias_env
+               CALL force_env_calc_energy_force(bias_env(box_number)%force_env, calc_force=.FALSE.)
+               CALL force_env_get(bias_env(box_number)%force_env, &
+                                  potential_energy=last_bias_energy(ibox))
+               bias_energy(box_number) = last_bias_energy(box_number)
             ENDIF
+
          ELSEIF (rand .LT. pmswap) THEN
 
             ! try a swap move
