@@ -588,7 +588,7 @@ CONTAINS
                ! update energy of bias_env
                CALL force_env_calc_energy_force(bias_env(box_number)%force_env, calc_force=.FALSE.)
                CALL force_env_get(bias_env(box_number)%force_env, &
-                                  potential_energy=last_bias_energy(ibox))
+                                  potential_energy=last_bias_energy(box_number))
                bias_energy(box_number) = last_bias_energy(box_number)
             ENDIF
 
