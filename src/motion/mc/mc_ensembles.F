@@ -573,6 +573,12 @@ CONTAINS
                                box_number, nnstep, rng_stream)
 
             IF (lbias) THEN
+               ! update pointers oldsys & particles_old
+               CALL force_env_get(force_env(box_number)%force_env, &
+                                  subsys=oldsys(box_number)%subsys)
+               CALL cp_subsys_get(oldsys(box_number)%subsys, &
+                                  particles=particles_old(box_number)%list)
+
                ! need to sync the coordinates between force_env & bias_env
                CALL force_env_get(bias_env(box_number)%force_env, subsys=biassys)
                CALL cp_subsys_get(biassys, particles=particles_bias)
