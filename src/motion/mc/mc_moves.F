@@ -1971,7 +1971,7 @@ CONTAINS
       INTEGER                                            :: start_mol, end_mol, source, group, handle, &
                                                             jbox, natom, nswapmoves, imol_type, &
                                                             switch_atom1, switch_atom2, idum, jdum, &
-                                                            nbond, nconnected, remove_atom, ipart
+                                                            remove_atom, ipart, nin1, nin2
       INTEGER, DIMENSION(:), POINTER                     :: mol_type, nunits, nunits_tot
       INTEGER, DIMENSION(:, :), POINTER                  :: nchains
       LOGICAL                                            :: ionode, lbias, loverlap, ldum
@@ -1980,19 +1980,16 @@ CONTAINS
                                                             exp_max_val, exp_min_val, max_val, min_val, &
                                                             new_energy, rand, w, weight_new, weight_old, &
                                                             rmin, avbmc_rminsq1, avbmc_rmaxsq1, &
-                                                            distsq, dx, dy, dz, rdum, prefactor, &
+                                                            avbmc_rminsq2, avbmc_rmaxsq2, &
+                                                            distsq, rdum, prefactor, &
                                                             volume_in1, volume_in2
 
-      REAL(KIND=dp)                                      :: connected(6)                                              
-      REAL(KIND=dp), DIMENSION(1:3)                      :: abc                                              
+      REAL(KIND=dp), DIMENSION(1:3)                      :: in_list1
+      REAL(KIND=dp), DIMENSION(1:3)                      :: abc, diff
       REAL(dp), DIMENSION(:), POINTER                    :: avbmc_rmax, avbmc_rmin                                              
-      TYPE(bond_type), DIMENSION(:), POINTER             :: bond_list      
       TYPE(cell_type), POINTER                           :: cell
       TYPE(cp_subsys_type), POINTER                      :: subsys, subsys_force
       TYPE(mc_molecule_info_type), POINTER               :: mc_molecule_info
-      TYPE(molecule_kind_list_type), POINTER             :: molecule_kinds
-      TYPE(molecule_kind_type), POINTER                  :: molecule_kind1, molecule_kind2, &
-                                                            molecule_kind_test
       TYPE(particle_list_type), POINTER                  :: particles, particles_force
 
       CALL timeset(routineN, handle)
@@ -2011,7 +2008,7 @@ CONTAINS
       ENDDO
       end_mol = start_mol + SUM(nchains(:, box_number)) - 1
 
-      NULLIFY (particles, subsys, molecule_kinds, particles_force, subsys_force)
+      NULLIFY (particles, subsys, particles_force, subsys_force)
 
       IF (lbias) THEN
 
@@ -2023,20 +2020,8 @@ CONTAINS
 
       ENDIF
 
-      CALL cp_subsys_get(subsys, particles=particles, molecule_kinds=molecule_kinds)
+      CALL cp_subsys_get(subsys, particles=particles)
       CALL get_cell(cell, abc=abc)
-      
-! now find the molecule kind associated with molecule_type 1 & 2
-      CALL cp_subsys_get(subsys, particles=particles, molecule_kinds=molecule_kinds)
-      DO imol_type = 1, SIZE(molecule_kinds%els(:))
-         molecule_kind_test => molecule_kinds%els(imol_type)
-         CALL get_molecule_kind(molecule_kind_test, name=name)
-         IF (trim(adjustl(name)) == trim(adjustl(names(molecule_type1)))) THEN
-            molecule_kind1 => molecule_kinds%els(imol_type)
-         ELSEIF (trim(adjustl(name)) == trim(adjustl(names(molecule_type2)))) THEN
-            molecule_kind2 => molecule_kinds%els(imol_type)     
-         ENDIF        
-      ENDDO
 
       moves1%switch%attempts = moves1%switch%attempts + 1
       moves2%switch%attempts = moves2%switch%attempts + 1
@@ -2054,53 +2039,56 @@ CONTAINS
       CALL mp_bcast(switch_atom1, source, group)
       CALL mp_bcast(switch_atom2, source, group)
 
-      ! find all the atoms connected to O in OH3
-      CALL get_molecule_kind(molecule_kind1, nbond=nbond, bond_list=bond_list)
+      avbmc_rminsq1 = avbmc_rmin(molecule_type1) * avbmc_rmin(molecule_type1)
+      avbmc_rmaxsq1 = avbmc_rmax(molecule_type1) * avbmc_rmax(molecule_type1)
 
-      nconnected = 0
-      DO idum = 1, nbond
-         IF (bond_list(idum)%a .EQ. 1) THEN
-            nconnected = nconnected + 1     
-            connected(nconnected) = bond_list(idum)%b
-         ELSEIF (bond_list(idum)%b .EQ. 1) THEN
-            nconnected = nconnected + 1     
-            connected(nconnected) = bond_list(idum)%a
-         ENDIF     
+      ! find nin1 & nin2
+      nin1 = 0
+      DO idum = 1, 3
+         remove_atom = switch_atom1 + idum
+         diff = r_old(:, remove_atom) - r_old(:, switch_atom1)
+         diff = diff - abc*ANINT(diff/abc)
+         distsq = DOT_PRODUCT(diff, diff)
+         IF (distsq .GE. avbmc_rminsq1 .AND. distsq .LE. avbmc_rmaxsq1) THEN
+            nin1 = nin1 + 1
+            in_list1(nin1) = remove_atom
+         ENDIF
+      ENDDO
+
+      IF (nin1 .EQ. 0) THEN
+         IF (ionode) WRITE(*,*) 'empty'
+         CALL timestop(handle)
+         RETURN
+      END IF
+
+      avbmc_rminsq2 = avbmc_rmin(molecule_type2) * avbmc_rmin(molecule_type2)
+      avbmc_rmaxsq2 = avbmc_rmax(molecule_type2) * avbmc_rmax(molecule_type2)
+
+      nin2 = 0
+      DO idum = 1, 2
+         ipart = switch_atom2 + idum
+         diff = r_old(:, ipart) - r_old(:, switch_atom2)
+         diff = diff - abc*ANINT(diff/abc)
+         distsq = DOT_PRODUCT(diff, diff)
+         IF (distsq .GE. avbmc_rminsq2 .AND. distsq .LE. avbmc_rmaxsq2) THEN
+            nin2 = nin2 + 1
+         ENDIF
       ENDDO
 
       ! randomly select one to remove
       IF (ionode) rand = rng_stream%next()
       CALL mp_bcast(rand, source, group)
-      idum = ceiling(rand*real(nconnected, dp))
-      remove_atom = connected(idum)
- 
-      ! add an offset 
-      remove_atom = switch_atom1 + remove_atom - 1
+      idum = CEILING(rand*REAL(nin1, dp))
+      remove_atom = in_list1(idum)
 
       IF (ionode) THEN
          WRITE(*,*) 'step: ',         nnstep
          WRITE(*,*) 'switch_atom1: ', switch_atom1
          WRITE(*,*) 'switch_atom2: ', switch_atom2
          WRITE(*,*) 'remove_atom: ', remove_atom
+         WRITE(*,*) 'nin1: ', nin1
+         WRITE(*,*) 'nin2: ', nin2
       ENDIF
-   
-      ! make sure the distance between O & removed H in OH3 is
-      ! within its rmin & rmax, otherwise reject
-      dx = r_old(1, remove_atom) - r_old(1, switch_atom1)
-      dy = r_old(2, remove_atom) - r_old(2, switch_atom1)
-      dz = r_old(3, remove_atom) - r_old(3, switch_atom1)
-      dx = dx - abc(1)*anint(dx/abc(1))
-      dy = dy - abc(2)*anint(dy/abc(2))
-      dz = dz - abc(3)*anint(dz/abc(3))
-      distsq = dx*dx + dy*dy+ dz*dz
-
-      avbmc_rminsq1 = avbmc_rmin(molecule_type1) *  avbmc_rmin(molecule_type1)
-      avbmc_rmaxsq1 = avbmc_rmax(molecule_type1) *  avbmc_rmax(molecule_type1)
-      IF (distsq .LT. avbmc_rminsq1 .OR. distsq .GT. avbmc_rmaxsq1) THEN
-         IF (ionode) WRITE(*,*) 'failed sanity check'    
-         CALL timestop(handle)
-         RETURN
-      END IF
       
       IF (lbias) THEN
 
@@ -2168,9 +2156,9 @@ CONTAINS
          RETURN
       ENDIF
 
-      volume_in1 = 4.0_dp/3.0_dp*pi*(avbmc_rmax(molecule_type1)**3 - avbmc_rmin(molecule_type1)**3)
-      volume_in2 = 4.0_dp/3.0_dp*pi*(avbmc_rmax(molecule_type2)**3 - avbmc_rmin(molecule_type2)**3)
-      prefactor =  volume_in2/volume_in1
+      volume_in1 = avbmc_rmaxsq1*avbmc_rmax(molecule_type1) - avbmc_rminsq1*avbmc_rmin(molecule_type1)
+      volume_in2 = avbmc_rmaxsq2*avbmc_rmax(molecule_type2) - avbmc_rminsq2*avbmc_rmin(molecule_type2)
+      prefactor =  (REAL(nin1, dp)/(nin2+1)) * (volume_in2/volume_in1)
 
 ! if we're biasing, we need to compute the new energy with the full
 ! potential
