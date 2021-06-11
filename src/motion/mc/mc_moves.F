@@ -1967,7 +1967,7 @@ CONTAINS
                                                             jbox, natom, nswapmoves, imol_type, &
                                                             switch_atom1, switch_atom2, idum, jdum, &
                                                             remove_atom, ipart, i, j, iatom, jatom, &
-                                                            nmol_types
+                                                            nmol_types, nin1, nin2
       INTEGER, DIMENSION(:), POINTER                     :: mol_type, nunits, nunits_tot
       INTEGER, DIMENSION(:, :), POINTER                  :: nchains
       LOGICAL                                            :: ionode, loverlap
@@ -1979,10 +1979,14 @@ CONTAINS
                                                             volume_in1, volume_in2, &
                                                             vec_ref_len, OH1_len, OH2_len, &
                                                             cos_theta1, cos_theta2, cos_theta, &
-                                                            sin_theta, phi, avbmc_rmin3, avbmc_rmax3, &
+                                                            sin_theta, phi, distsq, &
+                                                            avbmc_rminsq1, avbmc_rmaxsq1, &
+                                                            avbmc_rminsq2, avbmc_rmaxsq2, &
+                                                            avbmc_rmin3, avbmc_rmax3, &
                                                             k_vec_len, sfac                                                            
 
-      REAL(KIND=dp), DIMENSION(1:3)                      :: abc, H1, H2, vec_ref, OH1, OH2, & 
+      REAL(KIND=dp), DIMENSION(1:3)                      :: abc, in_list1, diff, &
+                                                            H1, H2, vec_ref, OH1, OH2, &
                                                             dir_vec, zplus, vec, k_vec, new_vec, H3
       REAL(KIND=dp), DIMENSION(1:3, 1:3)                 :: OH2_mol      
       REAL(dp), DIMENSION(:), POINTER                    :: avbmc_rmax, avbmc_rmin, max_angle, min_cos
@@ -2032,21 +2036,57 @@ CONTAINS
       moves1%switch%attempts = moves1%switch%attempts + 1
       moves2%switch%attempts = moves2%switch%attempts + 1
 
-      ALLOCATE (min_cos(1:nmol_types))
+      avbmc_rminsq1 = avbmc_rmin(molecule_type1) * avbmc_rmin(molecule_type1)
+      avbmc_rmaxsq1 = avbmc_rmax(molecule_type1) * avbmc_rmax(molecule_type1)
 
-      ! randomly select one H to remove
+      ! find nin1 & nin2
+      nin1 = 0
+      DO idum = 1, 3
+         remove_atom = switch_atom1 + idum
+         diff = r_old(:, remove_atom) - r_old(:, switch_atom1)
+         diff = diff - abc*ANINT(diff/abc)
+         distsq = DOT_PRODUCT(diff, diff)
+         IF (distsq .GE. avbmc_rminsq1 .AND. distsq .LE. avbmc_rmaxsq1) THEN
+            nin1 = nin1 + 1
+            in_list1(nin1) = remove_atom
+         ENDIF
+      ENDDO
+
+      IF (nin1 .EQ. 0) THEN
+         IF (ionode) WRITE(*,*) 'empty'
+         CALL timestop(handle)
+         RETURN
+      END IF
+
+      avbmc_rminsq2 = avbmc_rmin(molecule_type2) * avbmc_rmin(molecule_type2)
+      avbmc_rmaxsq2 = avbmc_rmax(molecule_type2) * avbmc_rmax(molecule_type2)
+
+      nin2 = 0
+      DO idum = 1, 2
+         ipart = switch_atom2 + idum
+         diff = r_old(:, ipart) - r_old(:, switch_atom2)
+         diff = diff - abc*ANINT(diff/abc)
+         distsq = DOT_PRODUCT(diff, diff)
+         IF (distsq .GE. avbmc_rminsq2 .AND. distsq .LE. avbmc_rmaxsq2) THEN
+            nin2 = nin2 + 1
+         ENDIF
+      ENDDO
+
+      ! randomly select one to remove
       IF (ionode) rand = rng_stream%next()
       CALL mp_bcast(rand, source, group)
-      ipart = CEILING(rand*REAL(3, dp)) ! 1, 2, or 3
+      idum = CEILING(rand*REAL(nin1, dp))
+      remove_atom = in_list1(idum)
 
-      ! add offset 
-      remove_atom = switch_atom1 + ipart
+      ALLOCATE (min_cos(1:nmol_types))
 
       IF (ionode) THEN
          WRITE(*,*) 'step: ', nnstep
          WRITE(*,*) 'switch_atom1: ', switch_atom1
          WRITE(*,*) 'switch_atom2: ', switch_atom2
          WRITE(*,*) 'remove_atom: ', remove_atom
+         WRITE(*,*) 'nin1: ', nin1
+         WRITE(*,*) 'nin2: ', nin2
          WRITE(*,*) 'old OH3'
          DO i = 1, 4
             WRITE(*,*) r_old(:, switch_atom1+i-1)*angstrom
@@ -2062,21 +2102,13 @@ CONTAINS
       vec_ref(1:3) = r_old(1:3, remove_atom) - r_old(1:3, switch_atom1)
       vec_ref_len = SQRT(DOT_PRODUCT(vec_ref, vec_ref))
 
-      IF (vec_ref_len .LT. avbmc_rmin(molecule_type1) .OR. &
-          vec_ref_len .GT. avbmc_rmax(molecule_type1)) THEN
-         IF (ionode) WRITE(*,*) 'failed distance check: ', vec_ref_len*angstrom
-         DEALLOCATE(min_cos)
-         CALL timestop(handle)
-         RETURN
-      END IF
-
       IF (ionode) WRITE(*,*) 'old length', vec_ref_len*angstrom
       
       ! copy OH3 into OH2_mol array
       OH2_mol(1:3, 1) =  r_old(1:3, switch_atom1)
       j = 2
       DO i = 1, 3
-         IF (i .eq. ipart) CYCLE
+         IF ((i+switch_atom1) .EQ. remove_atom) CYCLE
          OH2_mol(1:3, j) = r_old(1:3, switch_atom1 + i)
          j = j + 1
       ENDDO       
@@ -2160,8 +2192,8 @@ CONTAINS
       ! select between rmin2 & rmax2
       IF (ionode) rand = rng_stream%next()
       CALL mp_bcast(rand, source, group)
-      avbmc_rmin3 = avbmc_rmin(molecule_type2)**3
-      avbmc_rmax3 = avbmc_rmax(molecule_type2)**3             
+      avbmc_rmin3 = avbmc_rmin(molecule_type2)*avbmc_rminsq2
+      avbmc_rmax3 = avbmc_rmax(molecule_type2)*avbmc_rmaxsq2
       sfac = (rand*(avbmc_rmax3 - avbmc_rmin3) + avbmc_rmin3)**(1.0_dp/3.0_dp)
       new_vec(1:3) = new_vec(1:3)*sfac
       H3(1:3) = new_vec(1:3) + OH2_mol(1:3, 1)
@@ -2202,10 +2234,11 @@ CONTAINS
          CALL force_env_calc_energy_force(force_env, calc_force=.FALSE.)
          CALL force_env_get(force_env, potential_energy=new_energy)
 
-         ! 2/3*pi*R**2*h (h = Rcos_theta and  neglect 2/3*pi)
-         volume_in2 = (avbmc_rmax3 - avbmc_rmin3)*min_cos(molecule_type2)
-         volume_in1 = (avbmc_rmax(molecule_type1)**3 - avbmc_rmin(molecule_type1)**3)*min_cos(molecule_type1)
-         prefactor = volume_in2/volume_in1
+         ! 2/3*pi*R**2*h (h = R(1-cos_theta) and  neglect 2/3*pi)
+         volume_in2 = (avbmc_rmax3 - avbmc_rmin3) * (1.0_dp-min_cos(molecule_type2))
+         volume_in1 = (avbmc_rmax(molecule_type1)*avbmc_rmaxsq1 - avbmc_rmin(molecule_type1)*avbmc_rminsq1) &
+                      * (1.0_dp-min_cos(molecule_type1))
+         prefactor =  (REAL(nin1, dp)/(nin2+1)) * (volume_in2/volume_in1)
 
          value = -BETA*(new_energy-old_energy)
          IF (value .GT. exp_max_val) THEN
