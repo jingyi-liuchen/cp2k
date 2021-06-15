@@ -1253,13 +1253,13 @@ CONTAINS
       ENDDO
 
 ! adjust to take into account molecules of other types in the box
+      molecule_number = 1
       DO imol_type = 1, molecule_type - 1
-         start_mol = start_mol + nchains(imol_type, box_number)
+         molecule_number = molecule_number + nchains(imol_type, box_number)
       ENDDO
 
-! find the atom number offset
       start_atom = 1
-      DO imolecule = 1, start_mol - 1
+      DO imolecule = 1, molecule_number - 1
          start_atom = start_atom + nunits(mol_type(start_mol + imolecule - 1))
       ENDDO
 

@@ -1967,29 +1967,26 @@ CONTAINS
                                                             jbox, natom, nswapmoves, imol_type, &
                                                             switch_atom1, switch_atom2, idum, jdum, &
                                                             remove_atom, ipart, i, j, iatom, jatom, &
-                                                            nmol_types, nin1, nin2
-      INTEGER, DIMENSION(:), POINTER                     :: mol_type, nunits, nunits_tot
+                                                            nmol_types, nin, nout, nin2
+      INTEGER, DIMENSION(:), POINTER                     :: mol_type, nunits, nunits_tot, &
+                                                            list_in, list_out
       INTEGER, DIMENSION(:, :), POINTER                  :: nchains
       LOGICAL                                            :: ionode, loverlap
       
       REAL(KIND=dp)                                      :: BETA, del_quickstep_energy, &
                                                             exp_max_val, exp_min_val, max_val, min_val, &
                                                             new_energy, rand, w,  value, &
-                                                            rmin, rdum, prefactor, &
-                                                            volume_in1, volume_in2, &
+                                                            rmin, rdum, prefactor, OOrmax, &
                                                             vec_ref_len, OH1_len, OH2_len, &
                                                             cos_theta1, cos_theta2, cos_theta, &
-                                                            sin_theta, phi, distsq, &
-                                                            avbmc_rminsq1, avbmc_rmaxsq1, &
-                                                            avbmc_rminsq2, avbmc_rmaxsq2, &
-                                                            avbmc_rmin3, avbmc_rmax3, &
-                                                            k_vec_len, sfac                                                            
+                                                            sin_theta, phi, &
+                                                            k_vec_len, sfac, min_cos, &
+                                                            min_len, max_len
 
-      REAL(KIND=dp), DIMENSION(1:3)                      :: abc, in_list1, diff, &
+      REAL(KIND=dp), DIMENSION(1:3)                      :: abc, diff, &
                                                             H1, H2, vec_ref, OH1, OH2, &
                                                             dir_vec, zplus, vec, k_vec, new_vec, H3
       REAL(KIND=dp), DIMENSION(1:3, 1:3)                 :: OH2_mol      
-      REAL(dp), DIMENSION(:), POINTER                    :: avbmc_rmax, avbmc_rmin, max_angle, min_cos
       TYPE(bond_type), DIMENSION(:), POINTER             :: bond_list      
       TYPE(cell_type), POINTER                           :: cell
       TYPE(cp_subsys_type), POINTER                      :: subsys
@@ -1998,10 +1995,9 @@ CONTAINS
 
       CALL timeset(routineN, handle)
 
-      CALL get_mc_par(mc_par, rmin=rmin, &
+      CALL get_mc_par(mc_par, rmin=rmin, OOrmax=OOrmax, &
                       BETA=BETA, max_val=max_val, min_val=min_val, exp_max_val=exp_max_val, &
                       exp_min_val=exp_min_val, &
-                      avbmc_rmin=avbmc_rmin, avbmc_rmax=avbmc_rmax, max_angle=max_angle, &
                       ionode=ionode, source=source, &
                       group=group, mc_molecule_info=mc_molecule_info)
       CALL get_mc_molecule_info(mc_molecule_info, nmol_types=nmol_types, nchains=nchains, nunits=nunits, &
@@ -2020,73 +2016,49 @@ CONTAINS
       ENDDO
       end_mol = start_mol + SUM(nchains(:, box_number)) - 1      
 
-      ! randomly select a OH3 (type 1) and OH2 (type 2)
+      moves1%switch%attempts = moves1%switch%attempts + 1
+      moves2%switch%attempts = moves2%switch%attempts + 1
+
+      ! randomly select a OH3 (type 1)
       IF (ionode) THEN
          CALL find_mc_test_molecule(mc_molecule_info, &
                                     switch_atom1, idum, jdum, rng_stream, &
                                     box=box_number, molecule_type_old=molecule_type1)
          
-         CALL find_mc_test_molecule(mc_molecule_info, &
-                                    switch_atom2, idum, jdum, rng_stream, &
-                                    box=box_number, molecule_type_old=molecule_type2)
       ENDIF
       CALL mp_bcast(switch_atom1, source, group)
-      CALL mp_bcast(switch_atom2, source, group)
 
-      moves1%switch%attempts = moves1%switch%attempts + 1
-      moves2%switch%attempts = moves2%switch%attempts + 1
+      !hard coded O-O distance: 3 angstrom
+      ALLOCATE(list_in(nchains(molecule_type2, box_number)), list_out(nchains(molecule_type2, box_number)))
 
-      avbmc_rminsq1 = avbmc_rmin(molecule_type1) * avbmc_rmin(molecule_type1)
-      avbmc_rmaxsq1 = avbmc_rmax(molecule_type1) * avbmc_rmax(molecule_type1)
+      ! randomly select an immediate neighboring O
+      CALL create_inout_list(list_in, nin, list_out, nout, mc_molecule_info, particles, abc, &
+                             molecule_type2, 1, switch_atom1, 0.0_dp, OOrmax, box_number)
 
-      ! find nin1 & nin2
-      nin1 = 0
-      DO idum = 1, 3
-         remove_atom = switch_atom1 + idum
-         diff = r_old(:, remove_atom) - r_old(:, switch_atom1)
-         diff = diff - abc*ANINT(diff/abc)
-         distsq = DOT_PRODUCT(diff, diff)
-         IF (distsq .GE. avbmc_rminsq1 .AND. distsq .LE. avbmc_rmaxsq1) THEN
-            nin1 = nin1 + 1
-            in_list1(nin1) = remove_atom
-         ENDIF
-      ENDDO
-
-      IF (nin1 .EQ. 0) THEN
-         IF (ionode) WRITE(*,*) 'empty'
+      IF (nin .EQ. 0) THEN
+         DEALLOCATE(list_in, list_out)
+         WRITE(*,*) 'empty'
          CALL timestop(handle)
          RETURN
-      END IF
+      ENDIF
 
-      avbmc_rminsq2 = avbmc_rmin(molecule_type2) * avbmc_rmin(molecule_type2)
-      avbmc_rmaxsq2 = avbmc_rmax(molecule_type2) * avbmc_rmax(molecule_type2)
-
-      nin2 = 0
-      DO idum = 1, 2
-         ipart = switch_atom2 + idum
-         diff = r_old(:, ipart) - r_old(:, switch_atom2)
-         diff = diff - abc*ANINT(diff/abc)
-         distsq = DOT_PRODUCT(diff, diff)
-         IF (distsq .GE. avbmc_rminsq2 .AND. distsq .LE. avbmc_rmaxsq2) THEN
-            nin2 = nin2 + 1
-         ENDIF
-      ENDDO
-
-      ! randomly select one to remove
       IF (ionode) rand = rng_stream%next()
       CALL mp_bcast(rand, source, group)
-      idum = CEILING(rand*REAL(nin1, dp))
-      remove_atom = in_list1(idum)
+      idum = CEILING(rand*REAL(nin, dp))
+      switch_atom2 = list_in(idum)
 
-      ALLOCATE (min_cos(1:nmol_types))
+      ! randomly select one H to remove in OH3
+      IF (ionode) rand = rng_stream%next()
+      CALL mp_bcast(rand, source, group)
+      idum = CEILING(rand*REAL(3, dp))
+      remove_atom = switch_atom1 + idum
 
       IF (ionode) THEN
          WRITE(*,*) 'step: ', nnstep
          WRITE(*,*) 'switch_atom1: ', switch_atom1
          WRITE(*,*) 'switch_atom2: ', switch_atom2
          WRITE(*,*) 'remove_atom: ', remove_atom
-         WRITE(*,*) 'nin1: ', nin1
-         WRITE(*,*) 'nin2: ', nin2
+         WRITE(*,*) 'nin: ', nin
          WRITE(*,*) 'old OH3'
          DO i = 1, 4
             WRITE(*,*) r_old(:, switch_atom1+i-1)*angstrom
@@ -2097,12 +2069,9 @@ CONTAINS
          ENDDO
       ENDIF
    
-      ! make sure the distance between O & removed H in OH3 is
-      ! within its rmin & rmax, otherwise reject
       vec_ref(1:3) = r_old(1:3, remove_atom) - r_old(1:3, switch_atom1)
       vec_ref_len = SQRT(DOT_PRODUCT(vec_ref, vec_ref))
-
-      IF (ionode) WRITE(*,*) 'old length', vec_ref_len*angstrom
+      IF (ionode) WRITE(*,*) 'old_len:', vec_ref_len*angstrom
       
       ! copy OH3 into OH2_mol array
       OH2_mol(1:3, 1) =  r_old(1:3, switch_atom1)
@@ -2112,13 +2081,11 @@ CONTAINS
          OH2_mol(1:3, j) = r_old(1:3, switch_atom1 + i)
          j = j + 1
       ENDDO       
-      
-      ! make sure selected OH vector does not deviate more than max angle from vec_ref
+
+      ! find old angle
       CALL find_twoH(OH2_mol, H1, H2) 
-      
       OH1(1:3) = H1(1:3) - OH2_mol(1:3, 1)
       OH2(1:3) = H2(1:3) - OH2_mol(1:3, 1)
-
       OH1_len = SQRT(DOT_PRODUCT(OH1, OH1))
       OH2_len = SQRT(DOT_PRODUCT(OH2, OH2)) 
       cos_theta1 = DOT_PRODUCT(vec_ref, OH1)/vec_ref_len/OH1_len
@@ -2130,19 +2097,7 @@ CONTAINS
       ELSE
          cos_theta = cos_theta2
       ENDIF
-
-      DO i = 1, nmol_types
-         min_cos(i) = COS(max_angle(i))
-      ENDDO
-
-      IF (cos_theta < min_cos(molecule_type1)) THEN
-         IF (ionode) WRITE(*,*) 'failed angle check: ', ACOS(cos_theta)/pi*180.0
-         DEALLOCATE(min_cos)
-         CALL timestop(handle)
-         RETURN
-      ENDIF
-
-      IF (ionode) WRITE(*,*) 'old angle: ', ACOS(cos_theta)/pi*180.0
+      IF (ionode) WRITE(*,*) 'old_angle: ', ACOS(cos_theta)/pi*180.0
 
       ! begin to perform the move
       ! copy OH2 target into OH2_mol array
@@ -2163,13 +2118,13 @@ CONTAINS
       zplus(2) = 0.0_dp
       zplus(3) = 1.0_dp
 
-      ! select cos_theta from [min_cos, 1.0]
+      ! upper bound from old angle
+      min_cos = cos_theta
       IF (ionode) rand = rng_stream%next()
       CALL mp_bcast(rand, source, group)
-      cos_theta = rand*(1.0_dp - min_cos(molecule_type2)) + min_cos(molecule_type2)
+      cos_theta = rand*(1.0_dp - min_cos) + min_cos
       sin_theta = SQRT(1.0_dp - cos_theta*cos_theta)
-
-      IF(ionode) WRITE(*,*) 'new angle: ', ACOS(cos_theta)/pi*180.0
+      IF(ionode) WRITE(*,*) 'new_angle: ', ACOS(cos_theta)/pi*180.0
 
       ! select phi from [0, 2pi)
       IF (ionode) rand = rng_stream%next()
@@ -2189,16 +2144,21 @@ CONTAINS
       new_vec(1:3) = vec(1:3)*cos_theta + cross_product(k_vec, vec)*sin_theta &
                    + DOT_PRODUCT(k_vec, vec)*(1.0_dp-cos_theta)*k_vec(1:3)
 
-      ! select between rmin2 & rmax2
-      IF (ionode) rand = rng_stream%next()
-      CALL mp_bcast(rand, source, group)
-      avbmc_rmin3 = avbmc_rmin(molecule_type2)*avbmc_rminsq2
-      avbmc_rmax3 = avbmc_rmax(molecule_type2)*avbmc_rmaxsq2
-      sfac = (rand*(avbmc_rmax3 - avbmc_rmin3) + avbmc_rmin3)**(1.0_dp/3.0_dp)
+      ! randomly select a new bond length
+      IF (vec_ref_len  .LE. 1.88973_dp) THEN
+         sfac = vec_ref_len
+      ELSE
+         ! 0.95 angstrom
+         min_len = 1.79524_dp
+         max_len = vec_ref_len
+         IF (ionode) rand = rng_stream%next()
+         CALL mp_bcast(rand, source, group)
+         sfac = (rand*(max_len**3 - min_len**3) + min_len**3)**(1.0_dp/3.0_dp)
+      ENDIF
+
       new_vec(1:3) = new_vec(1:3)*sfac
       H3(1:3) = new_vec(1:3) + OH2_mol(1:3, 1)
-
-      IF(ionode) WRITE(*,*) 'new length: ', sfac*angstrom
+      IF(ionode) WRITE(*,*) 'new_length: ', sfac*angstrom
 
       ! identity switch
       j = 1
@@ -2231,15 +2191,14 @@ CONTAINS
          w = 0.0_dp
          IF (ionode) WRITE(*,*) 'overlap'
       ELSE
+         ! reverse move bias
+         CALL create_inout_list(list_in, nin2, list_out, nout, mc_molecule_info, particles, abc, &
+                                molecule_type2, 1, switch_atom1, 0.0_dp, OOrmax, box_number)
+
          CALL force_env_calc_energy_force(force_env, calc_force=.FALSE.)
          CALL force_env_get(force_env, potential_energy=new_energy)
 
-         ! 2/3*pi*R**2*h (h = R(1-cos_theta) and  neglect 2/3*pi)
-         volume_in2 = (avbmc_rmax3 - avbmc_rmin3) * (1.0_dp-min_cos(molecule_type2))
-         volume_in1 = (avbmc_rmax(molecule_type1)*avbmc_rmaxsq1 - avbmc_rmin(molecule_type1)*avbmc_rminsq1) &
-                      * (1.0_dp-min_cos(molecule_type1))
-         prefactor =  (REAL(nin1, dp)/(nin2+1)) * (volume_in2/volume_in1)
-
+         prefactor = REAL(nin, dp)/nin2
          value = -BETA*(new_energy-old_energy)
          IF (value .GT. exp_max_val) THEN
             w=10.0_dp
@@ -2250,6 +2209,7 @@ CONTAINS
          ENDIF
 
          IF (ionode) THEN
+            WRITE(*,*) 'nin2: ', nin2
             WRITE(*,*) 'prefactor: ', prefactor
             WRITE(*,*) 'old_energy: ', old_energy
             WRITE(*,*) 'new_energy: ', new_energy
@@ -2286,8 +2246,7 @@ CONTAINS
          ENDDO
       ENDIF
 
-      DEALLOCATE(min_cos)
-
+      DEALLOCATE(list_in, list_out)
 ! end the timing
       CALL timestop(handle)
 
