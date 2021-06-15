@@ -164,7 +164,7 @@ CONTAINS
       CPASSERT(.NOT. ASSOCIATED(section))
       CALL section_create(section, __LOCATION__, name="mc", &
                           description="This section sets parameters to set up a MonteCarlo calculation.", &
-                          n_keywords=11, n_subsections=2, repeats=.FALSE.)
+                          n_keywords=12, n_subsections=2, repeats=.FALSE.)
 
       NULLIFY (keyword, subsection)
 
@@ -228,6 +228,13 @@ CONTAINS
                           description="Distance cutoff for overlapping condition.", &
                           usage="RMIN {real}", &
                           default_r_val=1.2E0_dp)
+      CALL section_add_keyword(section, keyword)
+      CALL keyword_release(keyword)
+
+      CALL keyword_create(keyword, __LOCATION__, name="OORMAX", &
+                          description="Distance cutoff for finding second target.", &
+                          usage="OORMAX {real}", &
+                          default_r_val=3.0E0_dp)
       CALL section_add_keyword(section, keyword)
       CALL keyword_release(keyword)
 
@@ -395,7 +402,7 @@ CONTAINS
                           description="Parameters for Aggregation Volume Bias Monte Carlo (AVBMC) "// &
                           "which explores cluster formation and destruction. "// &
                           "Chen and Siepmann, J. Phys. Chem. B 105, 11275-11282 (2001).", &
-                          n_keywords=9, n_subsections=0, repeats=.FALSE.)
+                          n_keywords=8, n_subsections=0, repeats=.FALSE.)
 
       NULLIFY (keyword)
 
@@ -449,13 +456,6 @@ CONTAINS
       CALL keyword_create(keyword, __LOCATION__, name="AVBMC_RMAX", &
                           description="The outer radius for an AVBMC swap move, in angstroms, for every molecule type.", &
                           usage="AVBMC_RMAX {real} {real} ... ", &
-                          n_var=-1, type_of_var=real_t)
-      CALL section_add_keyword(section, keyword)
-      CALL keyword_release(keyword)
-
-      CALL keyword_create(keyword, __LOCATION__, name="MAX_ANGLE", &
-                          description="The maximum deviation from tetrahedral, in degrees, for every molecule type.", &
-                          usage="MAX_ANGLE {real} {real} ... ", &
                           n_var=-1, type_of_var=real_t)
       CALL section_add_keyword(section, keyword)
       CALL keyword_release(keyword)

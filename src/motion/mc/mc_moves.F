@@ -1971,7 +1971,7 @@ CONTAINS
       INTEGER, DIMENSION(:), POINTER                     :: mol_type, nunits, nunits_tot, &
                                                             list_in, list_out
       INTEGER, DIMENSION(:, :), POINTER                  :: nchains
-      LOGICAL                                            :: ionode, loverlap
+      LOGICAL                                            :: ionode, loverlap, lerror
       
       REAL(KIND=dp)                                      :: BETA, del_quickstep_energy, &
                                                             exp_max_val, exp_min_val, max_val, min_val, &
@@ -2194,6 +2194,14 @@ CONTAINS
          ! reverse move bias
          CALL create_inout_list(list_in, nin2, list_out, nout, mc_molecule_info, particles, abc, &
                                 molecule_type2, 1, switch_atom1, 0.0_dp, OOrmax, box_number)
+
+         ! just to make sure
+         lerror = .TRUE.
+         DO i = 1, nin2
+            IF (list_in(i) .EQ. switch_atom2) lerror = .FALSE.
+         ENDDO
+
+         IF (lerror) CPABORT('ERROR in switch move!')
 
          CALL force_env_calc_energy_force(force_env, calc_force=.FALSE.)
          CALL force_env_get(force_env, potential_energy=new_energy)
