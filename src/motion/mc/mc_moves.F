@@ -159,7 +159,7 @@ CONTAINS
       LOGICAL                                            :: ionode, lbias, loverlap
       REAL(KIND=dp)                                      :: BETA, bias_energy_new, bias_energy_old, &
                                                             dis_length, dis_angle, exp_max_val, exp_min_val, &
-                                                            rand, value, w
+                                                            rand, value, w, new_length
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: r_new, r_old
       TYPE(cp_subsys_type), POINTER                      :: subsys
       TYPE(mc_molecule_info_type), POINTER               :: mc_molecule_info
@@ -240,6 +240,7 @@ CONTAINS
 
       IF (.NOT. ASSOCIATED(molecule_kind)) CPABORT('Cannot find the molecule type')
 
+      lreject = .FALSE.
       dis_length = 1.0E0_dp
       dis_angle = 1.0E0_dp
 
@@ -262,7 +263,11 @@ CONTAINS
 
 ! do the move
          CALL change_bond_length(r_old, r_new, mc_par, molecule_type, &
-                                 molecule_kind, dis_length, particles, rng_stream)
+                                 molecule_kind, dis_length, new_length, particles, rng_stream)
+
+         IF (new_length .LT. 0.944863_dp .OR. new_length .GT. 2.83459_dp) THEN
+            lreject = .TRUE.
+         ENDIF
 
       ELSEIF (move_type == 'angle') THEN
 
@@ -310,7 +315,6 @@ CONTAINS
       ENDDO
 
 ! check for overlap
-      lreject = .FALSE.
       IF (lbias) THEN
          CALL check_for_overlap(bias_env, nchains(:, box_number), &
                                 nunits(:), loverlap, mol_type(start_mol:end_mol), &
@@ -327,7 +331,7 @@ CONTAINS
 
 ! here's where we bias the moves
 
-         IF (loverlap) THEN
+         IF (loverlap .OR. lreject) THEN
             w = 0.0E0_dp
          ELSE
             CALL force_env_calc_energy_force(bias_env, calc_force=.FALSE.)
@@ -387,7 +391,6 @@ CONTAINS
                           bias_energy_old
 
          ELSE
-
 ! reject the move
 ! restore the coordinates
             CALL force_env_get(bias_env, subsys=subsys)
@@ -1306,14 +1309,14 @@ CONTAINS
 !> \author MJM
 ! **************************************************************************************************
    SUBROUTINE change_bond_length(r_old, r_new, mc_par, molecule_type, molecule_kind, &
-                                 dis_length, particles, rng_stream)
+                                 dis_length, new_length, particles, rng_stream)
 
       REAL(KIND=dp), DIMENSION(:, :), INTENT(IN)         :: r_old
       REAL(KIND=dp), DIMENSION(:, :), INTENT(OUT)        :: r_new
       TYPE(mc_simpar_type), POINTER                      :: mc_par
       INTEGER, INTENT(IN)                                :: molecule_type
       TYPE(molecule_kind_type), POINTER                  :: molecule_kind
-      REAL(KIND=dp), INTENT(OUT)                         :: dis_length
+      REAL(KIND=dp), INTENT(OUT)                         :: dis_length, new_length
       TYPE(particle_list_type), POINTER                  :: particles
       TYPE(rng_stream_type), INTENT(INOUT)               :: rng_stream
 
@@ -1445,6 +1448,8 @@ CONTAINS
       ENDDO
 
 ! correct the value of dis_length for the acceptance rule
+
+      new_length = old_length + dis_length
       dis_length = (old_length + dis_length)/old_length
 
       DEALLOCATE (connection)
