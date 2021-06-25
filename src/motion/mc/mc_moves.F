@@ -1975,15 +1975,20 @@ CONTAINS
       REAL(KIND=dp)                                      :: BETA, del_quickstep_energy, &
                                                             exp_max_val, exp_min_val, max_val, min_val, &
                                                             new_energy, rand, w,  value, &
-                                                            rmin, rdum, prefactor, &
-                                                            vec_ref_len, OH1_len, OH2_len, &
-                                                            cos_theta1, cos_theta2, cos_theta, &
-                                                            sin_theta, phi, distsq, &
-                                                            k_vec_len, sfac                                                            
+                                                            rmin, rdum, &
+                                                            vec_ref_len, OH1_old_len, OH2_old_len, &
+                                                            OH1_new_len, OH2_new_len, &
+                                                            cos_theta1, cos_theta2, cos_theta_old, &
+                                                            cos_theta_new, theta_old, &
+                                                            theta_new, k_vec_len, &
+                                                            delta_theta, cos_delta_theta, &
+                                                            sin_delta_theta, a1, b1, c1, d1, &
+                                                            a2, b2, c2, d2, k1, m1, k2, m2, &
+                                                            delta, a, b, c, z1, z2
 
-      REAL(KIND=dp), DIMENSION(1:3)                      :: abc, H1, H2, vec_ref, OH1, OH2, &
-                                                            dir_vec, zplus, vec, k_vec, new_vec, H3
-      REAL(KIND=dp), DIMENSION(1:3, 1:3)                 :: OH2_mol      
+      REAL(KIND=dp), DIMENSION(1:3)                      :: abc, vec_ref, OH1_old, OH2_old, OH1_new, &
+                                                            OH2_new, k_vec, OH3, H3
+      REAL(KIND=dp), DIMENSION(1:3, 1:3)                 :: OH2_mol_old, OH2_mol_new
       TYPE(cell_type), POINTER                           :: cell
       TYPE(cp_subsys_type), POINTER                      :: subsys
       TYPE(mc_molecule_info_type), POINTER               :: mc_molecule_info
@@ -2055,77 +2060,144 @@ CONTAINS
 
       IF (ionode) WRITE(*,*) 'old length:', vec_ref_len*angstrom
       
-      ! copy OH3 into OH2_mol array
-      OH2_mol(1:3, 1) =  r_old(1:3, switch_atom1)
+      ! get OH2_old & OH2_new
+      OH2_mol_old(1:3, 1) =  r_old(1:3, switch_atom1)
       j = 2
       DO i = 1, 3
          IF ((i+switch_atom1) .EQ. remove_atom) CYCLE
-         OH2_mol(1:3, j) = r_old(1:3, switch_atom1 + i)
+         OH2_mol_old(1:3, j) = r_old(1:3, switch_atom1 + i)
          j = j + 1
       ENDDO       
 
-      ! find old angle 
-      CALL find_twoH(OH2_mol, H1, H2) 
-      OH1(1:3) = H1(1:3) - OH2_mol(1:3, 1)
-      OH2(1:3) = H2(1:3) - OH2_mol(1:3, 1)
-      OH1_len = SQRT(DOT_PRODUCT(OH1, OH1))
-      OH2_len = SQRT(DOT_PRODUCT(OH2, OH2)) 
-      cos_theta1 = DOT_PRODUCT(vec_ref, OH1)/vec_ref_len/OH1_len
-      cos_theta2 = DOT_PRODUCT(vec_ref, OH2)/vec_ref_len/OH2_len
+      ! find angles between OHremove and the other two OH bonds
+      OH1_old(1:3) = OH2_mol_old(1:3, 2) - OH2_mol_old(1:3, 1)
+      OH2_old(1:3) = OH2_mol_old(1:3, 3) - OH2_mol_old(1:3, 1)
+      OH1_old_len = SQRT(DOT_PRODUCT(OH1_old, OH1_old))
+      OH2_old_len = SQRT(DOT_PRODUCT(OH2_old, OH2_old))
+      cos_theta1 = DOT_PRODUCT(vec_ref, OH1_old)/vec_ref_len/OH1_old_len
+      cos_theta2 = DOT_PRODUCT(vec_ref, OH2_old)/vec_ref_len/OH2_old_len
 
-      ! select the smaller angle
-      IF (cos_theta1 .gt. cos_theta2) THEN
-         cos_theta = cos_theta1
-      ELSE
-         cos_theta = cos_theta2
+      ! find the first two angles to switch
+      cos_theta_old = DOT_PRODUCT(OH1_old, OH2_old)/OH1_old_len/OH2_old_len
+      theta_old = ACOS(cos_theta_old)
+
+      OH2_mol_new(1:3, 1:3) = r_old(1:3, switch_atom2:switch_atom2+2)
+      OH1_new(1:3) = OH2_mol_new(1:3, 2) - OH2_mol_new(1:3, 1)
+      OH2_new(1:3) = OH2_mol_new(1:3, 3) - OH2_mol_new(1:3, 1)
+      OH1_new_len = SQRT(DOT_PRODUCT(OH1_new, OH1_new))
+      OH2_new_len = SQRT(DOT_PRODUCT(OH2_new, OH2_new))
+      cos_theta_new = DOT_PRODUCT(OH1_new, OH2_new)/OH1_new_len/OH2_new_len
+      theta_new = ACOS(cos_theta_new)
+
+      ! change theta_old to theta_new
+      k_vec = cross_product(OH1_old, OH2_old)
+      k_vec_len = SQRT(DOT_PRODUCT(k_vec, k_vec))
+      k_vec(1:3) = k_vec(1:3)/k_vec_len
+
+      ! rotate OH1 and OH2 along k_vec (rodrigues' rotation formula)
+      delta_theta =  -(theta_new - theta_old)/2.0
+      cos_delta_theta = COS(delta_theta)
+      sin_delta_theta = SIN(delta_theta)
+      OH1_old(1:3) = OH1_old(1:3)*cos_delta_theta + cross_product(k_vec, OH1_old)*sin_delta_theta &
+                   + DOT_PRODUCT(k_vec, OH1_old)*(1.0_dp-cos_delta_theta)*k_vec(1:3)
+
+      OH2_old(1:3) = OH2_old(1:3)*cos_delta_theta - cross_product(k_vec, OH2_old)*sin_delta_theta &
+                   + DOT_PRODUCT(k_vec, OH2_old)*(1.0_dp-cos_delta_theta)*k_vec(1:3)
+
+      ! scale  OH1_old and OH2_old
+      OH1_old(1:3) = OH1_old(1:3)/OH1_old_len*OH1_new_len
+      OH2_old(1:3) = OH2_old(1:3)/OH2_old_len*OH2_new_len
+
+      ! change theta_new to theta_old
+      k_vec = cross_product(OH1_new, OH2_new)
+      k_vec_len = SQRT(DOT_PRODUCT(k_vec, k_vec))
+      k_vec(1:3) = k_vec(1:3)/k_vec_len
+
+      ! rotate OH1 and OH2 along k_vec (rodrigues' rotation formula)
+      delta_theta =  -(theta_old - theta_new)/2.0
+      cos_delta_theta = COS(delta_theta)
+      sin_delta_theta = SIN(delta_theta)
+      OH1_new(1:3) = OH1_new(1:3)*cos_delta_theta + cross_product(k_vec, OH1_new)*sin_delta_theta &
+                   + DOT_PRODUCT(k_vec, OH1_new)*(1.0_dp-cos_delta_theta)*k_vec(1:3)
+
+      OH2_new(1:3) = OH2_new(1:3)*cos_delta_theta - cross_product(k_vec, OH2_new)*sin_delta_theta &
+                   + DOT_PRODUCT(k_vec, OH2_new)*(1.0_dp-cos_delta_theta)*k_vec(1:3)
+
+      ! scale OH1_new and OH2_new
+      OH1_new(1:3) = OH1_new(1:3)/OH1_new_len*OH1_old_len
+      OH2_new(1:3) = OH2_new(1:3)/OH2_new_len*OH2_old_len
+
+      ! update lengths
+      OH1_old_len = SQRT(DOT_PRODUCT(OH1_old, OH1_old))
+      OH2_old_len = SQRT(DOT_PRODUCT(OH2_old, OH2_old))
+      OH1_new_len = SQRT(DOT_PRODUCT(OH1_new, OH1_new))
+      OH2_new_len = SQRT(DOT_PRODUCT(OH2_new, OH2_new))
+
+      ! change coordinates of 2 remaining Hs in OH3
+      j = 1
+      DO i = 1, 3
+         iatom = switch_atom1 + i
+         IF (iatom .EQ. remove_atom) CYCLE
+         IF (j .EQ. 1) THEN
+            r_old(1:3, iatom) = OH1_old(1:3) + OH2_mol_old(1:3, 1)
+         ELSE
+            r_old(1:3, iatom) = OH2_old(1:3) + OH2_mol_old(1:3, 1)
+         ENDIF
+         j = j + 1
+      ENDDO
+
+      ! change cooridnates of 2 H in OH2
+      j = 1
+      DO i = 1, 2
+         iatom = switch_atom2 + i
+         IF (j .EQ. 1) THEN
+            r_old(1:3, iatom) = OH1_new(1:3) + OH2_mol_new(1:3, 1)
+         ELSE
+            r_old(1:3, iatom) = OH2_new(1:3) + OH2_mol_new(1:3, 1)
+         ENDIF
+         j = j + 1
+      ENDDO
+
+      ! find where to insert H in OH2
+      a1 = OH1_new(1)
+      b1 = OH1_new(2)
+      c1 = OH1_new(3)
+      d1 = OH1_new_len*vec_ref_len*cos_theta1
+      a2 = OH2_new(1)
+      b2 = OH2_new(2)
+      c2 = OH2_new(3)
+      d2 = OH2_new_len*vec_ref_len*cos_theta2
+
+      ! y = k1 + m1*z
+      k1 =  (a2*d1-a1*d2)/(b1*a2-a1*b2)
+      m1 =  (a1*c2-a2*c1)/(b1*a2-a1*b2)
+      ! x = k2 + m2*z
+      k2 = (d1-b1*k1)/a1
+      m2 = -(c1+m1*b1)/a1
+
+      ! az**2+bz+c = 0
+      a = m1**2+m2**2+1.0_dp
+      b = 2.0_dp*(k1*m1+k2*m2)
+      c = k1**2 + k2**2 - vec_ref_len**2
+      delta = b**2-4.0_dp*a*c
+      IF (delta .LE. 0.0_dp) THEN
+         WRITE(*,*) 'delta wrong: ', delta
       ENDIF
 
-      IF (ionode) WRITE(*,*) 'old angle: ', ACOS(cos_theta)/pi*180.0
-
-      ! begin to perform the move
-      ! copy OH2 target into OH2_mol array
-      OH2_mol(1:3, 1:3) = r_old(1:3, switch_atom2:switch_atom2+2)
-      CALL find_twoH(OH2_mol, H1, H2)  
-
-      ! randomly select a tetrahedral vector for target OH2
+      z1 = (-b-SQRT(delta))/2.0_dp/a
+      z2 = (-b-SQRT(delta))/2.0_dp/a
+      ! randomly select a z
       IF (ionode) rand = rng_stream%next()
       CALL mp_bcast(rand, source, group)
       IF (rand .LT. 0.5_dp) THEN
-          dir_vec(1:3) = H1(1:3) - OH2_mol(1:3, 1)
+         OH3(3) = z1
       ELSE
-          dir_vec(1:3) = H2(1:3) - OH2_mol(1:3, 1)
+         OH3(3) = z2
       ENDIF
 
-      ! randomly select a point on a spherical cap centered with z+
-      zplus(1) = 0.0_dp
-      zplus(2) = 0.0_dp
-      zplus(3) = 1.0_dp
-
-      ! new angle = old angle
-      sin_theta = SQRT(1.0_dp - cos_theta*cos_theta)
-
-      ! select phi from [0, 2pi)
-      IF (ionode) rand = rng_stream%next()
-      CALL mp_bcast(rand, source, group)
-      phi = rand*2.0_dp*pi
-
-      vec(1) = sin_theta * COS(phi)
-      vec(2) = sin_theta * SIN(phi)
-      vec(3) = cos_theta
-
-      ! use rodrigues' rotation formula to rotate vec to new_vec around k_vec
-      k_vec = cross_product(zplus, dir_vec)
-      k_vec_len = SQRT(DOT_PRODUCT(k_vec, k_vec))
-      k_vec(1:3) = k_vec(1:3)/k_vec_len
-      sin_theta = k_vec_len
-      cos_theta = DOT_PRODUCT(zplus, dir_vec)
-      new_vec(1:3) = vec(1:3)*cos_theta + cross_product(k_vec, vec)*sin_theta &
-                   + DOT_PRODUCT(k_vec, vec)*(1.0_dp-cos_theta)*k_vec(1:3)
-
-      ! new length = old length
-      sfac = vec_ref_len
-      new_vec(1:3) = new_vec(1:3)*sfac
-      H3(1:3) = new_vec(1:3) + OH2_mol(1:3, 1)
+      OH3(1) = k2 + m2*OH3(3)
+      OH3(2) = k1 + m1*OH3(3)
+      H3(1:3) = OH2_mol_new(1:3, 1) + OH3(1:3)
 
       ! identity switch
       j = 1
