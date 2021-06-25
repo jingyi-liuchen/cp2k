@@ -1967,7 +1967,9 @@ CONTAINS
                                                             jbox, natom, imol_type, &
                                                             switch_atom1, switch_atom2, idum, jdum, &
                                                             remove_atom, ipart, i, j, iatom, jatom, &
-                                                            nmol_types
+                                                            nmol_types, molecule_number1, &
+                                                            molecule_number2, atom_number, &
+                                                            imolecule
       INTEGER, DIMENSION(:), POINTER                     :: mol_type, nunits, nunits_tot
       INTEGER, DIMENSION(:, :), POINTER                  :: nchains
       LOGICAL                                            :: ionode, loverlap
@@ -2030,6 +2032,29 @@ CONTAINS
       CALL mp_bcast(switch_atom1, source, group)
       CALL mp_bcast(switch_atom2, source, group)
 
+      ! find out molecule number for 2 molecules
+      molecule_number1 = 0
+      atom_number = 1
+      DO imolecule = 1, SUM(nchains(:, box_number))
+         IF (atom_number == switch_atom1) THEN
+            molecule_number1 = imolecule
+            EXIT
+         ENDIF
+         atom_number = atom_number + nunits(mol_type(imolecule + start_mol - 1))
+      ENDDO
+      IF (molecule_number1 == 0) CPABORT('Cannot find the molecule number 1')
+
+      molecule_number2 = 0
+      atom_number = 1
+      DO imolecule = 1, SUM(nchains(:, box_number))
+         IF (atom_number == switch_atom2) THEN
+            molecule_number2 = imolecule
+            EXIT
+         ENDIF
+         atom_number = atom_number + nunits(mol_type(imolecule + start_mol - 1))
+      ENDDO
+      IF (molecule_number2 == 0) CPABORT('Cannot find the molecule number 2')
+
       moves1%switch%attempts = moves1%switch%attempts + 1
       moves2%switch%attempts = moves2%switch%attempts + 1
 
@@ -2043,6 +2068,8 @@ CONTAINS
          WRITE(*,*) 'step: ', nnstep
          WRITE(*,*) 'switch_atom1: ', switch_atom1
          WRITE(*,*) 'switch_atom2: ', switch_atom2
+         WRITE(*,*) 'molecule_number1: ', molecule_number1
+         WRITE(*,*) 'molecule_number2: ', molecule_number2
          WRITE(*,*) 'remove_atom: ', remove_atom
          WRITE(*,*) 'old OH3'
          DO i = 1, 4
@@ -2057,8 +2084,6 @@ CONTAINS
       ! find old length
       vec_ref(1:3) = r_old(1:3, remove_atom) - r_old(1:3, switch_atom1)
       vec_ref_len = SQRT(DOT_PRODUCT(vec_ref, vec_ref))
-
-      IF (ionode) WRITE(*,*) 'old length:', vec_ref_len*angstrom
       
       ! get OH2_old & OH2_new
       OH2_mol_old(1:3, 1) =  r_old(1:3, switch_atom1)
@@ -2134,29 +2159,12 @@ CONTAINS
       OH2_new_len = SQRT(DOT_PRODUCT(OH2_new, OH2_new))
 
       ! change coordinates of 2 remaining Hs in OH3
-      j = 1
-      DO i = 1, 3
-         iatom = switch_atom1 + i
-         IF (iatom .EQ. remove_atom) CYCLE
-         IF (j .EQ. 1) THEN
-            r_old(1:3, iatom) = OH1_old(1:3) + OH2_mol_old(1:3, 1)
-         ELSE
-            r_old(1:3, iatom) = OH2_old(1:3) + OH2_mol_old(1:3, 1)
-         ENDIF
-         j = j + 1
-      ENDDO
+      OH2_mol_old(1:3, 2) = OH1_old(1:3) + OH2_mol_old(1:3, 1)
+      OH2_mol_old(1:3, 3) = OH2_old(1:3) + OH2_mol_old(1:3, 1)
 
       ! change cooridnates of 2 H in OH2
-      j = 1
-      DO i = 1, 2
-         iatom = switch_atom2 + i
-         IF (j .EQ. 1) THEN
-            r_old(1:3, iatom) = OH1_new(1:3) + OH2_mol_new(1:3, 1)
-         ELSE
-            r_old(1:3, iatom) = OH2_new(1:3) + OH2_mol_new(1:3, 1)
-         ENDIF
-         j = j + 1
-      ENDDO
+      OH2_mol_new(1:3, 2) = OH1_new(1:3) + OH2_mol_new(1:3, 1)
+      OH2_mol_new(1:3, 3) = OH2_new(1:3) + OH2_mol_new(1:3, 1)
 
       ! find where to insert H in OH2
       a1 = OH1_new(1)
@@ -2199,17 +2207,22 @@ CONTAINS
       OH3(2) = k1 + m1*OH3(3)
       H3(1:3) = OH2_mol_new(1:3, 1) + OH3(1:3)
 
-      ! identity switch
+      ! switch coordinates
+      ! assign new coordinates to OH3
       j = 1
       DO i = 1, 4
          iatom = switch_atom1 + i - 1
-         jatom = switch_atom2 + j - 1
          IF (iatom .EQ. remove_atom) CYCLE
-         particles%els(iatom)%r(1:3) = r_old(1:3, jatom)
-         particles%els(jatom)%r(1:3) = r_old(1:3, iatom)
+         particles%els(iatom)%r(1:3) = OH2_mol_new(1:3, j)
          j = j + 1
       ENDDO
       particles%els(remove_atom)%r(1:3) = H3(1:3)
+
+      ! assign new cooridnates to OH2
+      DO i = 1, 3
+         iatom = switch_atom2 + i - 1
+         particles%els(iatom)%r(1:3) = OH2_mol_old(1:3, i)
+      ENDDO
 
       IF (ionode) THEN
          WRITE(*,*) 'new OH3'
@@ -2222,9 +2235,13 @@ CONTAINS
          ENDDO
       ENDIF
       
-      ! check overlap
+      ! check overlap for new OH3
       CALL check_for_overlap(force_env, nchains(:, box_number), nunits(:), loverlap, mol_type(start_mol:end_mol), &
-                             rmin, molecule_number=1)      
+                             rmin, molecule_number=molecule_number1)
+
+      ! check overlap for new OH2
+      CALL check_for_overlap(force_env, nchains(:, box_number), nunits(:), loverlap, mol_type(start_mol:end_mol), &
+                             rmin, molecule_number=molecule_number2)
 
       IF (loverlap) THEN
          w = 0.0_dp
