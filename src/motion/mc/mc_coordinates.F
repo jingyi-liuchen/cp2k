@@ -45,7 +45,9 @@ MODULE mc_coordinates
              check_for_overlap, &
              rotate_molecule, &
              cluster_search, &
-             create_inout_list
+             create_inout_list, &
+             cross_product
+
 
    CHARACTER(len=*), PARAMETER, PRIVATE :: moduleN = 'mc_coordinates'
 
@@ -652,21 +654,21 @@ CONTAINS
                                           exp_max_val, exp_min_val, nswapmoves, rosenbluth_weight, &
                                           switch_atom1, switch_atom2, remove_atom, natoms_tot, &
                                           nunits, nunits_mol1, nunits_mol2, &
-                                          loverlap, choosen_energy, old_energy, &
+                                          mass1, mass2, loverlap, choosen_energy, old_energy, &
                                           ionode, lremove, mol_type, nchains, &
-                                          rmin1, rmax1, rmin2, rmax2, &
                                           source, group, rng_stream)
 
       TYPE(force_env_type), POINTER                      :: force_env
       REAL(KIND=dp), INTENT(IN)                          :: BETA, max_val, min_val, exp_max_val, &
-                                                            exp_min_val, rmin_overlap, rmin1, &
-                                                            rmax1, rmin2, rmax2
+                                                            exp_min_val, rmin_overlap
       INTEGER, INTENT(IN)                                :: nswapmoves
       REAL(KIND=dp), INTENT(OUT)                         :: rosenbluth_weight
       INTEGER, INTENT(IN)                                :: switch_atom1, switch_atom2, &
                                                             remove_atom, natoms_tot, &
                                                             nunits_mol1, nunits_mol2
       INTEGER, DIMENSION(:), INTENT(IN)                  :: nunits
+      REAL(dp), DIMENSION(1:nunits_mol1), INTENT(IN)     :: mass1
+      REAL(dp), DIMENSION(1:nunits_mol2), INTENT(IN)     :: mass2
       LOGICAL, INTENT(OUT)                               :: loverlap
       REAL(KIND=dp), INTENT(OUT)                         :: choosen_energy
       REAL(KIND=dp), INTENT(IN)                          :: old_energy
@@ -679,14 +681,28 @@ CONTAINS
 
       INTEGER                                            :: atom_number, choosen, handle, &
                                                             i, j, iatom, jatom, imolecule, &
-                                                            imove, molecule_number1
-      LOGICAL                                            :: all_overlaps
+                                                            imove, molecule_number1, &
+                                                            molecule_number2
+      LOGICAL                                            :: all_overlaps, loverlap1, loverlap2
       LOGICAL, ALLOCATABLE, DIMENSION(:)                 :: loverlap_array
       REAL(KIND=dp)                                      :: bias_energy, exponent, rand, &
-                                                            total_running_weight
+                                                            total_running_weight, &
+                                                            vec_ref_len, OH1_old_len, OH2_old_len, &
+                                                            OH1_new_len, OH2_new_len, &
+                                                            cos_theta1, cos_theta2, cos_theta_old, &
+                                                            cos_theta_new, theta_old, &
+                                                            theta_new, k_vec_len, &
+                                                            delta_theta, cos_delta_theta, &
+                                                            sin_delta_theta, a1, b1, c1, d1, &
+                                                            a2, b2, c2, d2, k1, m1, k2, m2, &
+                                                            delta, a, b, c, z1, z2
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:)           :: boltz_weights, trial_energy
-      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: r, r_old
-      REAL(KIND=dp), DIMENSION(1:3)                      :: abc, r_insert
+      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :)     :: OH3_mol_all
+      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: r_old
+      REAL(KIND=dp), DIMENSION(1:3, 1:4)                 :: OH3_mol
+      REAL(KIND=dp), DIMENSION(1:3, 1:3)                 :: OH2_mol_old, OH2_mol_new
+      REAL(KIND=dp), DIMENSION(1:3)                      :: abc, vec_ref, OH1_old, OH2_old, OH1_new, &
+                                                            OH2_new, k_vec, OH3, H3
       TYPE(cell_type), POINTER                           :: cell
       TYPE(cp_subsys_type), POINTER                      :: oldsys
       TYPE(particle_list_type), POINTER                  :: particles
@@ -702,7 +718,7 @@ CONTAINS
       CALL cp_subsys_get(oldsys, particles=particles)
 
       ALLOCATE (r_old(1:3, 1:natoms_tot))
-      ALLOCATE (r(1:3, 1:nswapmoves))
+      ALLOCATE (OH3_mol_all(1:3, 1:4, 1:nswapmoves))
       ALLOCATE (trial_energy(1:nswapmoves))
       ALLOCATE (boltz_weights(1:nswapmoves))
       ALLOCATE (loverlap_array(1:nswapmoves))
@@ -712,7 +728,6 @@ CONTAINS
       loverlap = .FALSE.
       boltz_weights(:) = 0.0_dp
       trial_energy(:) = 0.0_dp
-      r(:, :) = 0.0_dp
       choosen_energy = 0.0_dp
       rosenbluth_weight = 0.0_dp
 
@@ -724,7 +739,7 @@ CONTAINS
       ! figure out which molecule number we're on for OH3 (for later use)
       molecule_number1 = 0
       atom_number = 1
-      DO imolecule = 1, sum(nchains(:))
+      DO imolecule = 1, SUM(nchains(:))
          IF (atom_number .EQ. switch_atom1) THEN
             molecule_number1 = imolecule
             EXIT 
@@ -733,6 +748,18 @@ CONTAINS
       ENDDO
       IF (molecule_number1 == 0) &
          CPABORT('CBMC switch move cannot find which molecule number it needs')
+
+      ! figure out which molecule number we're on for OH2 (for later use)
+      molecule_number2 = 0
+      atom_number = 1
+      DO imolecule = 1, SUM(nchains(:))
+         IF (atom_number .EQ. switch_atom2) THEN
+            molecule_number2 = imolecule
+            EXIT
+         ENDIF
+         atom_number = atom_number + nunits(mol_type(imolecule))
+      ENDDO
+      IF (molecule_number2 == 0) CPABORT('Cannot find the molecule number 2')
 
       IF (lremove) THEN
          CALL check_for_overlap(force_env, nchains, nunits, loverlap_array(1), &
@@ -747,54 +774,193 @@ CONTAINS
             ENDIF
             CPABORT('CBMC switch move found an overlap in the old config')
          ENDIF
+
+         OH3_mol(1:3, 1:4) = r_old(1:3, switch_atom1:switch_atom1+3)
+      ELSE
+
+         ! find old length
+         vec_ref(1:3) = r_old(1:3, remove_atom) - r_old(1:3, switch_atom1)
+         vec_ref_len = SQRT(DOT_PRODUCT(vec_ref, vec_ref))
+
+         ! get OH2_old & OH2_new
+         OH2_mol_old(1:3, 1) =  r_old(1:3, switch_atom1)
+         j = 2
+         DO i = 1, 3
+            IF ((i+switch_atom1) .EQ. remove_atom) CYCLE
+            OH2_mol_old(1:3, j) = r_old(1:3, switch_atom1 + i)
+            j = j + 1
+         ENDDO
+
+         ! find angles between OHremove and the other two OH bonds
+         OH1_old(1:3) = OH2_mol_old(1:3, 2) - OH2_mol_old(1:3, 1)
+         OH2_old(1:3) = OH2_mol_old(1:3, 3) - OH2_mol_old(1:3, 1)
+         OH1_old_len = SQRT(DOT_PRODUCT(OH1_old, OH1_old))
+         OH2_old_len = SQRT(DOT_PRODUCT(OH2_old, OH2_old))
+         cos_theta1 = DOT_PRODUCT(vec_ref, OH1_old)/vec_ref_len/OH1_old_len
+         cos_theta2 = DOT_PRODUCT(vec_ref, OH2_old)/vec_ref_len/OH2_old_len
+
+         ! find the first two angles to switch
+         cos_theta_old = DOT_PRODUCT(OH1_old, OH2_old)/OH1_old_len/OH2_old_len
+         theta_old = ACOS(cos_theta_old)
+
+         OH2_mol_new(1:3, 1:3) = r_old(1:3, switch_atom2:switch_atom2+2)
+         OH1_new(1:3) = OH2_mol_new(1:3, 2) - OH2_mol_new(1:3, 1)
+         OH2_new(1:3) = OH2_mol_new(1:3, 3) - OH2_mol_new(1:3, 1)
+         OH1_new_len = SQRT(DOT_PRODUCT(OH1_new, OH1_new))
+         OH2_new_len = SQRT(DOT_PRODUCT(OH2_new, OH2_new))
+         cos_theta_new = DOT_PRODUCT(OH1_new, OH2_new)/OH1_new_len/OH2_new_len
+         theta_new = ACOS(cos_theta_new)
+
+         ! change theta_old to theta_new
+         k_vec = cross_product(OH1_old, OH2_old)
+         k_vec_len = SQRT(DOT_PRODUCT(k_vec, k_vec))
+         k_vec(1:3) = k_vec(1:3)/k_vec_len
+
+         ! rotate OH1 and OH2 along k_vec (rodrigues' rotation formula)
+         delta_theta =  -(theta_new - theta_old)/2.0
+         cos_delta_theta = COS(delta_theta)
+         sin_delta_theta = SIN(delta_theta)
+         OH1_old(1:3) = OH1_old(1:3)*cos_delta_theta + cross_product(k_vec, OH1_old)*sin_delta_theta &
+                      + DOT_PRODUCT(k_vec, OH1_old)*(1.0_dp-cos_delta_theta)*k_vec(1:3)
+         OH2_old(1:3) = OH2_old(1:3)*cos_delta_theta - cross_product(k_vec, OH2_old)*sin_delta_theta &
+                      + DOT_PRODUCT(k_vec, OH2_old)*(1.0_dp-cos_delta_theta)*k_vec(1:3)
+         ! scale  OH1_old and OH2_old
+         OH1_old(1:3) = OH1_old(1:3)/OH1_old_len*OH1_new_len
+         OH2_old(1:3) = OH2_old(1:3)/OH2_old_len*OH2_new_len
+         ! change theta_new to theta_old
+         k_vec = cross_product(OH1_new, OH2_new)
+         k_vec_len = SQRT(DOT_PRODUCT(k_vec, k_vec))
+         k_vec(1:3) = k_vec(1:3)/k_vec_len
+         ! rotate OH1 and OH2 along k_vec (rodrigues' rotation formula)
+         delta_theta =  -(theta_old - theta_new)/2.0
+         cos_delta_theta = COS(delta_theta)
+         sin_delta_theta = SIN(delta_theta)
+         OH1_new(1:3) = OH1_new(1:3)*cos_delta_theta + cross_product(k_vec, OH1_new)*sin_delta_theta &
+                      + DOT_PRODUCT(k_vec, OH1_new)*(1.0_dp-cos_delta_theta)*k_vec(1:3)
+
+         OH2_new(1:3) = OH2_new(1:3)*cos_delta_theta - cross_product(k_vec, OH2_new)*sin_delta_theta &
+                      + DOT_PRODUCT(k_vec, OH2_new)*(1.0_dp-cos_delta_theta)*k_vec(1:3)
+
+         ! scale OH1_new and OH2_new
+         OH1_new(1:3) = OH1_new(1:3)/OH1_new_len*OH1_old_len
+         OH2_new(1:3) = OH2_new(1:3)/OH2_new_len*OH2_old_len
+
+         ! update lengths
+         OH1_old_len = SQRT(DOT_PRODUCT(OH1_old, OH1_old))
+         OH2_old_len = SQRT(DOT_PRODUCT(OH2_old, OH2_old))
+         OH1_new_len = SQRT(DOT_PRODUCT(OH1_new, OH1_new))
+         OH2_new_len = SQRT(DOT_PRODUCT(OH2_new, OH2_new))
+
+         ! change coordinates of 2 remaining Hs in OH3
+         OH2_mol_old(1:3, 2) = OH1_old(1:3) + OH2_mol_old(1:3, 1)
+         OH2_mol_old(1:3, 3) = OH2_old(1:3) + OH2_mol_old(1:3, 1)
+
+         ! change cooridnates of 2 H in OH2
+         OH2_mol_new(1:3, 2) = OH1_new(1:3) + OH2_mol_new(1:3, 1)
+         OH2_mol_new(1:3, 3) = OH2_new(1:3) + OH2_mol_new(1:3, 1)
+
+         ! find where to insert H in OH2
+         a1 = OH1_new(1)
+         b1 = OH1_new(2)
+         c1 = OH1_new(3)
+         d1 = OH1_new_len*vec_ref_len*cos_theta1
+         a2 = OH2_new(1)
+         b2 = OH2_new(2)
+         c2 = OH2_new(3)
+         d2 = OH2_new_len*vec_ref_len*cos_theta2
+
+         ! y = k1 + m1*z
+         k1 =  (a2*d1-a1*d2)/(b1*a2-a1*b2)
+         m1 =  (a1*c2-a2*c1)/(b1*a2-a1*b2)
+         ! x = k2 + m2*z
+         k2 = (d1-b1*k1)/a1
+         m2 = -(c1+m1*b1)/a1
+
+         ! az**2+bz+c = 0
+         a = m1**2+m2**2+1.0_dp
+         b = 2.0_dp*(k1*m1+k2*m2)
+         c = k1**2 + k2**2 - vec_ref_len**2
+         delta = b**2-4.0_dp*a*c
+         IF (delta .LE. 0.0_dp) THEN
+            WRITE(*,*) 'delta wrong: ', delta
+         ENDIF
+
+         z1 = (-b-SQRT(delta))/2.0_dp/a
+         z2 = (-b-SQRT(delta))/2.0_dp/a
+         ! randomly select a z
+         IF (ionode) rand = rng_stream%next()
+         CALL mp_bcast(rand, source, group)
+         IF (rand .LT. 0.5_dp) THEN
+            OH3(3) = z1
+         ELSE
+            OH3(3) = z2
+         ENDIF
+
+         OH3(1) = k2 + m2*OH3(3)
+         OH3(2) = k1 + m1*OH3(3)
+         H3(1:3) = OH2_mol_new(1:3, 1) + OH3(1:3)
+
+         ! switch coordinates
+         ! assign new coordinates to OH3
+         j = 1
+         DO i = 1, 4
+            iatom = switch_atom1 + i - 1
+            IF (iatom .EQ. remove_atom) CYCLE
+            particles%els(iatom)%r(1:3) = OH2_mol_new(1:3, j)
+            j = j + 1
+         ENDDO
+         particles%els(remove_atom)%r(1:3) = H3(1:3)
+
+         ! assign new cooridnates to OH2
+         DO i = 1, 3
+            iatom = switch_atom2 + i - 1
+            particles%els(iatom)%r(1:3) = OH2_mol_old(1:3, i)
+         ENDDO
+
+         ! check overlap after switching bonds and angles
+         CALL check_for_overlap(force_env, nchains, nunits, loverlap1, &
+                                mol_type, rmin_overlap, molecule_number=molecule_number1)
+
+         CALL check_for_overlap(force_env, nchains, nunits, loverlap2, &
+                                mol_type, rmin_overlap, molecule_number=molecule_number2)
+
+         IF (loverlap1 .OR. loverlap2) THEN
+            loverlap = .TRUE.
+            DEALLOCATE (r_old)
+            DEALLOCATE (OH3_mol_all)
+            DEALLOCATE (trial_energy)
+            DEALLOCATE (boltz_weights)
+            DEALLOCATE (loverlap_array)
+            CALL timestop(handle)
+            RETURN
+         ENDIF
+
+         DO i = 1, nunits_mol1
+            OH3_mol(1:3, i) = particles%els(switch_atom1+i-1)%r(1:3)
+         ENDDO
       ENDIF
 
       DO imove = 1, nswapmoves
-
          IF (ionode) THEN
-
-            IF (lremove) THEN
-               IF (imove .EQ. 1) THEN 
-
-                  r_insert(:) = r_old(:, remove_atom)
-
-               ELSE
-                  CALL generate_avbmc_insertion(rmin1, rmax1, &
-                                                r_old(1:3, switch_atom1),&
-                                                'in', r_insert(:), abc(:), rng_stream)
-               ENDIF                  
-
-            ELSE
-               CALL generate_avbmc_insertion(rmin2, rmax2, & 
-                                             r_old(1:3, switch_atom2),&
-                                             'in', r_insert(:), abc(:), rng_stream)
+            ! rotate from the same configuration
+            OH3_mol_all(:, :, imove) = OH3_mol(:, :)
+            IF (imove .NE. 1) THEN
+               CALL rotate_molecule(OH3_mol_all(:, :, imove), mass1(:), nunits_mol1, rng_stream, center_atom=1)
             ENDIF
-
          ENDIF
 
-         CALL mp_bcast(r_insert(:), source, group)
-         r(:, imove) = r_insert(:)
+         CALL mp_bcast(OH3_mol_all(:, :, imove), source, group)
+         !WRITE(*,*) '4'
+         !WRITE(*,*) 'imove: ', imove
+         DO i = 1, nunits_mol1
+            particles%els(switch_atom1+i-1)%r(1:3) = OH3_mol_all(1:3, i, imove)
+         !   WRITE(*,*)  OH3_mol_all(1:3, i, imove)*angstrom
+         ENDDO
 
-         IF (lremove) THEN
-            ! change the coordinates of selected H in OH3                 
-            particles%els(remove_atom)%r(1:3) = r_insert(1:3)
-         ELSE
-            ! identity switch
-            j = 1 
-            DO i = 1, nunits_mol1
-               iatom = switch_atom1 + i - 1
-               jatom = switch_atom2 + j - 1
-               IF (iatom .EQ. remove_atom) CYCLE
-               particles%els(iatom)%r(1:3) = r_old(1:3, jatom)
-               particles%els(jatom)%r(1:3) = r_old(1:3, iatom)
-               j = j + 1
-            ENDDO    
-            particles%els(remove_atom)%r(1:3) = r_insert(1:3)
-         ENDIF
-
-         ! check OH3 for both old and new config
+         ! check OH3
          CALL check_for_overlap(force_env, nchains, nunits, loverlap_array(imove), &
                                 mol_type, rmin_overlap, molecule_number=molecule_number1)
+
 
          IF (loverlap_array(imove)) THEN
             boltz_weights(imove) = 0.0_dp
@@ -871,7 +1037,7 @@ CONTAINS
          ENDIF
 
          DEALLOCATE (r_old)
-         DEALLOCATE (r)
+         DEALLOCATE (OH3_mol_all)
          DEALLOCATE (trial_energy)
          DEALLOCATE (boltz_weights)
          DEALLOCATE (loverlap_array)
@@ -891,7 +1057,9 @@ CONTAINS
 
 ! copy the coordinates to the force environment
       IF (lremove) THEN
-         particles%els(remove_atom)%r(1:3) = r_old(1:3, remove_atom)
+         DO i = 1, nunits_mol1
+             particles%els(switch_atom1+i-1)%r(1:3) = r_old(1:3, switch_atom1+i-1)
+         ENDDO
 
          IF (ionode) THEN
             WRITE(*,*) 'OLD OH3:'
@@ -905,16 +1073,10 @@ CONTAINS
          ENDIF
 
       ELSE
-         j = 1
+
          DO i = 1, nunits_mol1
-            iatom = switch_atom1 + i - 1
-            jatom = switch_atom2 + j - 1
-            IF (iatom .EQ. remove_atom) CYCLE
-            particles%els(iatom)%r(1:3) = r_old(1:3, jatom)
-            particles%els(jatom)%r(1:3) = r_old(1:3, iatom)
-            j = j + 1
+            particles%els(switch_atom1+i-1)%r(1:3) = OH3_mol_all(1:3, i, choosen)
          ENDDO
-         particles%els(remove_atom)%r(1:3) = r(1:3, choosen)
 
          IF (ionode) THEN
             WRITE(*,*) 'NEW OH3:'
@@ -929,7 +1091,7 @@ CONTAINS
       ENDIF
 
       DEALLOCATE (r_old)
-      DEALLOCATE (r)
+      DEALLOCATE (OH3_mol_all)
       DEALLOCATE (trial_energy)
       DEALLOCATE (boltz_weights)
       DEALLOCATE (loverlap_array)
@@ -1612,6 +1774,16 @@ CONTAINS
       CALL timestop(handle)
 
    END SUBROUTINE
+
+!> calculate the cross product of two vectors
+! **************************************************************************************************
+   FUNCTION cross_product(a, b) RESULT(cross)
+      REAL(KIND=dp), DIMENSION(3), INTENT(IN)           :: a, b
+      REAL(KIND=dp), DIMENSION(3)                       :: cross
+      cross(1) = a(2) * b(3) - a(3) * b(2)
+      cross(2) = a(3) * b(1) - a(1) * b(3)
+      cross(3) = a(1) * b(2) - a(2) * b(1)
+   END FUNCTION cross_product
 
 END MODULE mc_coordinates
 

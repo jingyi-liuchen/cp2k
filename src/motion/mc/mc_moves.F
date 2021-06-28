@@ -1976,17 +1976,12 @@ CONTAINS
       INTEGER, DIMENSION(:, :), POINTER                  :: nchains
       LOGICAL                                            :: ionode, lbias, loverlap, ldum
       
+      REAL(dp), DIMENSION(:, :), POINTER                 :: mass      
       REAL(KIND=dp)                                      :: BETA, bias_energy_new, del_quickstep_energy, &
                                                             exp_max_val, exp_min_val, max_val, min_val, &
                                                             new_energy, rand, w, weight_new, weight_old, &
-                                                            rmin, avbmc_rminsq1, avbmc_rmaxsq1, &
-                                                            avbmc_rminsq2, avbmc_rmaxsq2, &
-                                                            distsq, rdum, prefactor, &
-                                                            volume_in1, volume_in2
-
-      REAL(KIND=dp), DIMENSION(1:3)                      :: in_list1
+                                                            rmin, rdum 
       REAL(KIND=dp), DIMENSION(1:3)                      :: abc, diff
-      REAL(dp), DIMENSION(:), POINTER                    :: avbmc_rmax, avbmc_rmin                                              
       TYPE(cell_type), POINTER                           :: cell
       TYPE(cp_subsys_type), POINTER                      :: subsys, subsys_force
       TYPE(mc_molecule_info_type), POINTER               :: mc_molecule_info
@@ -1997,10 +1992,10 @@ CONTAINS
       CALL get_mc_par(mc_par, lbias=lbias, rmin=rmin, &
                       BETA=BETA, max_val=max_val, min_val=min_val, exp_max_val=exp_max_val, &
                       exp_min_val=exp_min_val, nswapmoves=nswapmoves, &
-                      avbmc_rmin=avbmc_rmin, avbmc_rmax=avbmc_rmax,ionode=ionode, source=source, &
+                      ionode=ionode, source=source, &
                       group=group, mc_molecule_info=mc_molecule_info)
       CALL get_mc_molecule_info(mc_molecule_info, nchains=nchains, nunits=nunits, &
-                                nunits_tot=nunits_tot, mol_type=mol_type, names=names)
+                                mass=mass, nunits_tot=nunits_tot, mol_type=mol_type, names=names)
 
       start_mol = 1
       DO jbox = 1, box_number - 1
@@ -2039,55 +2034,17 @@ CONTAINS
       CALL mp_bcast(switch_atom1, source, group)
       CALL mp_bcast(switch_atom2, source, group)
 
-      avbmc_rminsq1 = avbmc_rmin(molecule_type1) * avbmc_rmin(molecule_type1)
-      avbmc_rmaxsq1 = avbmc_rmax(molecule_type1) * avbmc_rmax(molecule_type1)
-
-      ! find nin1 & nin2
-      nin1 = 0
-      DO idum = 1, 3
-         remove_atom = switch_atom1 + idum
-         diff = r_old(:, remove_atom) - r_old(:, switch_atom1)
-         diff = diff - abc*ANINT(diff/abc)
-         distsq = DOT_PRODUCT(diff, diff)
-         IF (distsq .GE. avbmc_rminsq1 .AND. distsq .LE. avbmc_rmaxsq1) THEN
-            nin1 = nin1 + 1
-            in_list1(nin1) = remove_atom
-         ENDIF
-      ENDDO
-
-      IF (nin1 .EQ. 0) THEN
-         IF (ionode) WRITE(*,*) 'empty'
-         CALL timestop(handle)
-         RETURN
-      END IF
-
-      avbmc_rminsq2 = avbmc_rmin(molecule_type2) * avbmc_rmin(molecule_type2)
-      avbmc_rmaxsq2 = avbmc_rmax(molecule_type2) * avbmc_rmax(molecule_type2)
-
-      nin2 = 0
-      DO idum = 1, 2
-         ipart = switch_atom2 + idum
-         diff = r_old(:, ipart) - r_old(:, switch_atom2)
-         diff = diff - abc*ANINT(diff/abc)
-         distsq = DOT_PRODUCT(diff, diff)
-         IF (distsq .GE. avbmc_rminsq2 .AND. distsq .LE. avbmc_rmaxsq2) THEN
-            nin2 = nin2 + 1
-         ENDIF
-      ENDDO
-
       ! randomly select one to remove
       IF (ionode) rand = rng_stream%next()
       CALL mp_bcast(rand, source, group)
-      idum = CEILING(rand*REAL(nin1, dp))
-      remove_atom = in_list1(idum)
+      idum = CEILING(rand*REAL(3, dp))
+      remove_atom = switch_atom1 + idum
 
       IF (ionode) THEN
          WRITE(*,*) 'step: ',         nnstep
          WRITE(*,*) 'switch_atom1: ', switch_atom1
          WRITE(*,*) 'switch_atom2: ', switch_atom2
          WRITE(*,*) 'remove_atom: ', remove_atom
-         WRITE(*,*) 'nin1: ', nin1
-         WRITE(*,*) 'nin2: ', nin2
       ENDIF
       
       IF (lbias) THEN
@@ -2096,20 +2053,18 @@ CONTAINS
          CALL generate_cbmc_switch_config(bias_env, rmin, BETA, max_val, min_val, exp_max_val, exp_min_val, & 
                                           nswapmoves, weight_old, switch_atom1, switch_atom2, remove_atom, &
                                           nunits_tot(box_number), nunits, nunits(molecule_type1), nunits(molecule_type2), &
-                                          ldum, rdum, bias_energy_old, &
+                                          mass(:, molecule_type1), mass(:, molecule_type2), ldum, &
+                                          rdum, bias_energy_old, &
                                           ionode, .TRUE., mol_type(start_mol:end_mol), nchains(:, box_number), &
-                                          avbmc_rmin(molecule_type1), avbmc_rmax(molecule_type1), &
-                                          avbmc_rmin(molecule_type2), avbmc_rmax(molecule_type2), &
                                           source, group, rng_stream)
 
          !new
          CALL generate_cbmc_switch_config(bias_env, rmin, BETA, max_val, min_val, exp_max_val, exp_min_val, &
                                           nswapmoves, weight_new, switch_atom1, switch_atom2, remove_atom, &
                                           nunits_tot(box_number), nunits, nunits(molecule_type1), nunits(molecule_type2), &
-                                          loverlap, bias_energy_new, bias_energy_old, &
+                                          mass(:, molecule_type1), mass(:, molecule_type2), loverlap, &
+                                          bias_energy_new, bias_energy_old, &
                                           ionode, .FALSE., mol_type(start_mol:end_mol), nchains(:, box_number), &
-                                          avbmc_rmin(molecule_type1), avbmc_rmax(molecule_type1), &
-                                          avbmc_rmin(molecule_type2), avbmc_rmax(molecule_type2), &
                                           source, group, rng_stream)
                                 
          bias_energy_new = bias_energy_new + bias_energy_old
@@ -2120,20 +2075,18 @@ CONTAINS
          CALL generate_cbmc_switch_config(force_env, rmin, BETA, max_val, min_val, exp_max_val, exp_min_val, &
                                           nswapmoves, weight_old, switch_atom1, switch_atom2, remove_atom, &
                                           nunits_tot(box_number), nunits, nunits(molecule_type1), nunits(molecule_type2), &
-                                          ldum, rdum, old_energy, &
+                                          mass(:, molecule_type1), mass(:, molecule_type2), ldum, &
+                                          rdum, old_energy, &
                                           ionode, .TRUE., mol_type(start_mol:end_mol), nchains(:, box_number), &
-                                          avbmc_rmin(molecule_type1), avbmc_rmax(molecule_type1), &
-                                          avbmc_rmin(molecule_type2), avbmc_rmax(molecule_type2), &
                                           source, group, rng_stream)
              
          !new
          CALL generate_cbmc_switch_config(force_env, rmin, BETA, max_val, min_val, exp_max_val, exp_min_val, &
                                           nswapmoves, weight_new, switch_atom1, switch_atom2, remove_atom, &
                                           nunits_tot(box_number), nunits, nunits(molecule_type1), nunits(molecule_type2), &
-                                          loverlap, new_energy, old_energy, &
+                                          mass(:, molecule_type1), mass(:, molecule_type2), loverlap, &
+                                          new_energy, old_energy, &
                                           ionode, .FALSE., mol_type(start_mol:end_mol), nchains(:, box_number), &
-                                          avbmc_rmin(molecule_type1), avbmc_rmax(molecule_type1), &
-                                          avbmc_rmin(molecule_type2), avbmc_rmax(molecule_type2), &
                                           source, group, rng_stream)
 
       ENDIF
@@ -2155,10 +2108,6 @@ CONTAINS
          CALL timestop(handle)
          RETURN
       ENDIF
-
-      volume_in1 = avbmc_rmaxsq1*avbmc_rmax(molecule_type1) - avbmc_rminsq1*avbmc_rmin(molecule_type1)
-      volume_in2 = avbmc_rmaxsq2*avbmc_rmax(molecule_type2) - avbmc_rminsq2*avbmc_rmin(molecule_type2)
-      prefactor =  (REAL(nin1, dp)/(nin2+1)) * (volume_in2/volume_in1)
 
 ! if we're biasing, we need to compute the new energy with the full
 ! potential
@@ -2188,10 +2137,9 @@ CONTAINS
             del_quickstep_energy = EXP(del_quickstep_energy)
          ENDIF
 
-         w = prefactor*del_quickstep_energy*weight_new/weight_old
+         w = del_quickstep_energy*weight_new/weight_old
 
          IF (ionode) THEN
-            WRITE(*,*) 'prefactor: ', prefactor
             WRITE(*,*) 'new_energy: ', new_energy
             WRITE(*,*) 'old_energy: ', old_energy
             WRITE(*,*) 'del_energy: ', new_energy - old_energy
@@ -2205,7 +2153,7 @@ CONTAINS
          ENDIF
       ELSE
 
-         w = prefactor*weight_new/weight_old
+         w = weight_new/weight_old
       ENDIF
 
 ! check if the move is accepted
