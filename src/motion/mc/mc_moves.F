@@ -1969,10 +1969,11 @@ CONTAINS
                                                             remove_atom, ipart, i, j, iatom, jatom, &
                                                             nmol_types, molecule_number1, &
                                                             molecule_number2, atom_number, &
-                                                            imolecule
-      INTEGER, DIMENSION(:), POINTER                     :: mol_type, nunits, nunits_tot
+                                                            imolecule, nin, nout, nin2
+      INTEGER, DIMENSION(:), POINTER                     :: mol_type, nunits, nunits_tot, &
+                                                            list_in, list_out
       INTEGER, DIMENSION(:, :), POINTER                  :: nchains
-      LOGICAL                                            :: ionode, loverlap
+      LOGICAL                                            :: ionode, loverlap, lerror
       
       REAL(KIND=dp)                                      :: BETA, del_quickstep_energy, &
                                                             exp_max_val, exp_min_val, max_val, min_val, &
@@ -1986,7 +1987,7 @@ CONTAINS
                                                             delta_theta, cos_delta_theta, &
                                                             sin_delta_theta, a1, b1, c1, d1, &
                                                             a2, b2, c2, d2, k1, m1, k2, m2, &
-                                                            delta, a, b, c, z1, z2
+                                                            delta, a, b, c, z1, z2, OOrmax, prefactor
 
       REAL(KIND=dp), DIMENSION(1:3)                      :: abc, vec_ref, OH1_old, OH2_old, OH1_new, &
                                                             OH2_new, k_vec, OH3, H3
@@ -1998,7 +1999,7 @@ CONTAINS
 
       CALL timeset(routineN, handle)
 
-      CALL get_mc_par(mc_par, rmin=rmin, &
+      CALL get_mc_par(mc_par, rmin=rmin, OOrmax=OOrmax, &
                       BETA=BETA, max_val=max_val, min_val=min_val, exp_max_val=exp_max_val, &
                       exp_min_val=exp_min_val, &
                       ionode=ionode, source=source, &
@@ -2019,41 +2020,60 @@ CONTAINS
       ENDDO
       end_mol = start_mol + SUM(nchains(:, box_number)) - 1      
 
-      ! randomly select a OH3 (type 1) and OH2 (type 2)
+      ! randomly select a OH3 (type 1)
       IF (ionode) THEN
          CALL find_mc_test_molecule(mc_molecule_info, &
                                     switch_atom1, idum, jdum, rng_stream, &
                                     box=box_number, molecule_type_old=molecule_type1)
-         
-         CALL find_mc_test_molecule(mc_molecule_info, &
-                                    switch_atom2, idum, jdum, rng_stream, &
-                                    box=box_number, molecule_type_old=molecule_type2)
       ENDIF
       CALL mp_bcast(switch_atom1, source, group)
-      CALL mp_bcast(switch_atom2, source, group)
+
+      ALLOCATE(list_in(nchains(molecule_type2, box_number)), list_out(nchains(molecule_type2, box_number)))
+
+      CALL create_inout_list(list_in, nin, list_out, nout, mc_molecule_info, particles, abc, &
+                             molecule_type2, 1, switch_atom1, 0.0_dp, OOrmax, box_number)
+
+      IF (nin .EQ. 0) THEN
+         DEALLOCATE(list_in, list_out)
+         IF (ionode) WRITE(*,*) 'empty'
+         CALL timestop(handle)
+         RETURN
+      ENDIF
+
+      ! randomly select an OH2 within OOrmax
+      IF (ionode) rand = rng_stream%next()
+      CALL mp_bcast(rand, source, group)
+      idum = CEILING(rand*REAL(nin, dp))
+      switch_atom2 = list_in(idum)
+
+      IF (ionode) THEN
+         WRITE(*,*) 'step: ', nnstep
+         WRITE(*,*) 'switch_atom1: ', switch_atom1
+         WRITE(*,*) 'switch_atom2: ', switch_atom2
+      ENDIF
 
       ! find out molecule number for 2 molecules
       molecule_number1 = 0
       atom_number = 1
       DO imolecule = 1, SUM(nchains(:, box_number))
-         IF (atom_number == switch_atom1) THEN
+         IF (atom_number .EQ. switch_atom1) THEN
             molecule_number1 = imolecule
             EXIT
          ENDIF
          atom_number = atom_number + nunits(mol_type(imolecule + start_mol - 1))
       ENDDO
-      IF (molecule_number1 == 0) CPABORT('Cannot find the molecule number 1')
+      IF (molecule_number1 .EQ. 0) CPABORT('Cannot find the molecule number 1')
 
       molecule_number2 = 0
       atom_number = 1
       DO imolecule = 1, SUM(nchains(:, box_number))
-         IF (atom_number == switch_atom2) THEN
+         IF (atom_number .EQ. switch_atom2) THEN
             molecule_number2 = imolecule
             EXIT
          ENDIF
          atom_number = atom_number + nunits(mol_type(imolecule + start_mol - 1))
       ENDDO
-      IF (molecule_number2 == 0) CPABORT('Cannot find the molecule number 2')
+      IF (molecule_number2 .EQ. 0) CPABORT('Cannot find the molecule number 2')
 
       moves1%switch%attempts = moves1%switch%attempts + 1
       moves2%switch%attempts = moves2%switch%attempts + 1
@@ -2065,9 +2085,6 @@ CONTAINS
       remove_atom = switch_atom1 + idum
 
       IF (ionode) THEN
-         WRITE(*,*) 'step: ', nnstep
-         WRITE(*,*) 'switch_atom1: ', switch_atom1
-         WRITE(*,*) 'switch_atom2: ', switch_atom2
          WRITE(*,*) 'molecule_number1: ', molecule_number1
          WRITE(*,*) 'molecule_number2: ', molecule_number2
          WRITE(*,*) 'remove_atom: ', remove_atom
@@ -2247,6 +2264,17 @@ CONTAINS
          w = 0.0_dp
          IF (ionode) WRITE(*,*) 'overlap'
       ELSE
+         ! calculate reverse move bias
+         CALL create_inout_list(list_in, nin2, list_out, nout, mc_molecule_info, particles, abc, &
+                                molecule_type2, 1, switch_atom1, 0.0_dp, OOrmax, box_number)
+         ! just to make sure
+         lerror = .TRUE.
+         DO i = 1, nin2
+            IF (list_in(i) .EQ. switch_atom2) lerror = .FALSE.
+         ENDDO
+         IF (lerror) CPABORT('ERROR in switch move!')
+         prefactor = REAL(nin, dp)/nin2
+
          CALL force_env_calc_energy_force(force_env, calc_force=.FALSE.)
          CALL force_env_get(force_env, potential_energy=new_energy)
 
@@ -2256,10 +2284,13 @@ CONTAINS
          ELSEIF(value .LT. exp_min_val) THEN
             w=0.0_dp
          ELSE
-            w=EXP(value)
+            w=prefactor*EXP(value)
          ENDIF
 
          IF (ionode) THEN
+            WRITE(*,*) 'nin: ', nin
+            WRITE(*,*) 'nin2: ', nin2
+            WRITE(*,*) 'prefactor: ', prefactor
             WRITE(*,*) 'old_energy: ', old_energy
             WRITE(*,*) 'new_energy: ', new_energy
             WRITE(*,*) 'del_energy: ', new_energy - old_energy
@@ -2296,6 +2327,7 @@ CONTAINS
       ENDIF
 
 ! end the timing
+      DEALLOCATE(list_in, list_out)
       CALL timestop(handle)
 
    END SUBROUTINE mc_switch_move                  
