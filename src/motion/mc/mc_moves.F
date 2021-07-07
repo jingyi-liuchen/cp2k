@@ -1969,7 +1969,7 @@ CONTAINS
                                                             remove_atom, ipart, i, j, iatom, jatom, &
                                                             nmol_types, molecule_number1, &
                                                             molecule_number2, atom_number, &
-                                                            imolecule, nin, nout, nin2
+                                                            imolecule, nin, nout, nin2, iselect
       INTEGER, DIMENSION(:), POINTER                     :: mol_type, nunits, nunits_tot, &
                                                             list_in, list_out
       INTEGER, DIMENSION(:, :), POINTER                  :: nchains
@@ -1987,10 +1987,12 @@ CONTAINS
                                                             delta_theta, cos_delta_theta, &
                                                             sin_delta_theta, a1, b1, c1, d1, &
                                                             a2, b2, c2, d2, k1, m1, k2, m2, &
-                                                            delta, a, b, c, z1, z2, OOrmax, prefactor
+                                                            delta, a, b, c, z1, z2, OOrmax, prefactor, &
+                                                            OH1_len, OH2_len
 
+      REAL(KIND=dp), DIMENSION(1:2)                      :: zs
       REAL(KIND=dp), DIMENSION(1:3)                      :: abc, vec_ref, OH1_old, OH2_old, OH1_new, &
-                                                            OH2_new, k_vec, OH3, H3
+                                                            OH2_new, k_vec, OH3, H3, OH1, OH2, cos_thetas
       REAL(KIND=dp), DIMENSION(1:3, 1:3)                 :: OH2_mol_old, OH2_mol_new
       TYPE(cell_type), POINTER                           :: cell
       TYPE(cp_subsys_type), POINTER                      :: subsys
@@ -2078,11 +2080,32 @@ CONTAINS
       moves1%switch%attempts = moves1%switch%attempts + 1
       moves2%switch%attempts = moves2%switch%attempts + 1
 
-      ! randomly select one to remove
-      IF (ionode) rand = rng_stream%next()
-      CALL mp_bcast(rand, source, group)
-      idum = CEILING(rand*REAL(3, dp))
-      remove_atom = switch_atom1 + idum
+      ! identify the H that is hydrogen bonded between O1 and O2
+      iselect = 0
+      DO i = 1, 3
+         remove_atom = switch_atom1 + i
+         OH1 = r_old(:, remove_atom) - r_old(:, switch_atom1)
+         OH1_len = SQRT(DOT_PRODUCT(OH1, OH1))
+         OH2 = r_old(:, remove_atom) - r_old(:, switch_atom2)
+         OH2_len = SQRT(DOT_PRODUCT(OH2, OH2))
+         cos_thetas(i) = DOT_PRODUCT(OH1, OH2)/OH1_len/OH2_len
+         IF (cos_thetas(i) .LT. -0.5_dp) THEN
+            iselect = i
+         ENDIF
+      ENDDO
+
+      IF (iselect .EQ. 0) THEN
+         DEALLOCATE(list_in, list_out)
+         IF (ionode) WRITE(*,*) 'failed to select a H to remove ', ACOS(cos_thetas(1:3))/pi*180.0
+         CALL timestop(handle)
+         RETURN
+      ELSE
+         IF (ionode) THEN
+            WRITE(*,*) 'angles ', ACOS(cos_thetas(1:3))/pi*180.0
+            WRITE(*,*) 'selected angle ', ACOS(cos_thetas(iselect))/pi*180.0
+         ENDIF
+         remove_atom = switch_atom1 + iselect
+      ENDIF
 
       IF (ionode) THEN
          WRITE(*,*) 'molecule_number1: ', molecule_number1
@@ -2210,19 +2233,40 @@ CONTAINS
       ENDIF
 
       z1 = (-b-SQRT(delta))/2.0_dp/a
-      z2 = (-b-SQRT(delta))/2.0_dp/a
-      ! randomly select a z
-      IF (ionode) rand = rng_stream%next()
-      CALL mp_bcast(rand, source, group)
-      IF (rand .LT. 0.5_dp) THEN
-         OH3(3) = z1
-      ELSE
-         OH3(3) = z2
-      ENDIF
+      z2 = (-b+SQRT(delta))/2.0_dp/a
+      zs(1) = z1
+      zs(2) = z2
 
-      OH3(1) = k2 + m2*OH3(3)
-      OH3(2) = k1 + m1*OH3(3)
-      H3(1:3) = OH2_mol_new(1:3, 1) + OH3(1:3)
+      ! select the z that results in OHinsertO angle > 120
+      iselect = 0
+      DO i = 1, 2
+         OH3(3) = zs(i)
+         OH3(1) = k2 + m2*OH3(3)
+         OH3(2) = k1 + m1*OH3(3)
+         H3(1:3) = OH2_mol_new(1:3, 1) + OH3(1:3)
+         OH2(:) = H3(:) - OH2_mol_old(:, 1)
+         OH2_len = SQRT(DOT_PRODUCT(OH2, OH2))
+         cos_thetas(i) = DOT_PRODUCT(OH3, OH2)/OH2_len/vec_ref_len
+         IF (cos_thetas(i) .LT. -0.5_dp) THEN
+            iselect = i
+         ENDIF
+      ENDDO
+
+      IF (iselect .EQ. 0) THEN
+         DEALLOCATE(list_in, list_out)
+         IF (ionode) WRITE(*,*) 'failed to select an insertion spot ', ACOS(cos_thetas(1:2))/pi*180.0
+         CALL timestop(handle)
+         RETURN
+      ELSE
+         IF (ionode) THEN
+            WRITE(*,*) 'angles ', ACOS(cos_thetas(1:2))/pi*180.0
+            WRITE(*,*) 'selected angle ', ACOS(cos_thetas(iselect))/pi*180.0
+         ENDIF
+         OH3(3) = zs(iselect)
+         OH3(1) = k2 + m2*OH3(3)
+         OH3(2) = k1 + m1*OH3(3)
+         H3(1:3) = OH2_mol_new(1:3, 1) + OH3(1:3)
+      ENDIF
 
       ! switch coordinates
       ! assign new coordinates to OH3
