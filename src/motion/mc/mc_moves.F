@@ -2210,7 +2210,7 @@ CONTAINS
       ENDIF
 
       z1 = (-b-SQRT(delta))/2.0_dp/a
-      z2 = (-b-SQRT(delta))/2.0_dp/a
+      z2 = (-b+SQRT(delta))/2.0_dp/a
       ! randomly select a z
       IF (ionode) rand = rng_stream%next()
       CALL mp_bcast(rand, source, group)
