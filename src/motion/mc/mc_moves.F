@@ -29,7 +29,11 @@ MODULE mc_moves
    USE force_env_methods,               ONLY: force_env_calc_energy_force
    USE force_env_types,                 ONLY: force_env_get,&
                                               force_env_type,&
-                                              use_fist_force
+                                              use_fist_force,&
+                                              use_qs_force
+   USE qs_energy_types,                 ONLY: qs_energy_type
+   USE qs_environment_types,            ONLY: get_qs_env,&
+                                              qs_environment_type
    USE global_types,                    ONLY: global_environment_type
    USE kinds,                           ONLY: default_string_length,&
                                               dp
@@ -1996,6 +2000,8 @@ CONTAINS
       TYPE(cp_subsys_type), POINTER                      :: subsys
       TYPE(mc_molecule_info_type), POINTER               :: mc_molecule_info
       TYPE(particle_list_type), POINTER                  :: particles
+      TYPE(qs_environment_type), POINTER                 :: qs_env
+      TYPE(qs_energy_type), POINTER                      :: old_qs_energy, new_qs_energy
 
       CALL timeset(routineN, handle)
 
@@ -2012,6 +2018,11 @@ CONTAINS
       CALL force_env_get(force_env, cell=cell, subsys=subsys)
       CALL cp_subsys_get(subsys, particles=particles)
       CALL get_cell(cell, abc=abc)
+
+      IF (force_env%in_use == use_qs_force)  THEN
+         CALL force_env_get(force_env, qs_env=qs_env)
+         CALL get_qs_env(qs_env, energy=old_qs_energy)
+      ENDIF
 
       ! find out some bounds for mol_type
       start_mol = 1
@@ -2048,6 +2059,14 @@ CONTAINS
 
       IF (ionode) THEN
          WRITE(*,*) 'step: ', nnstep
+         IF (force_env%in_use == use_qs_force)  THEN
+            WRITE(*,*) 'core_overlap: ', old_qs_energy%core_overlap
+            WRITE(*,*) 'core_self: ', old_qs_energy%core_self
+            WRITE(*,*) 'core: ', old_qs_energy%core
+            WRITE(*,*) 'hartree: ', old_qs_energy%hartree
+            WRITE(*,*) 'exc: ', old_qs_energy%exc 
+            WRITE(*,*) 'disp: ', old_qs_energy%dispersion
+         ENDIF
          WRITE(*,*) 'switch_atom1: ', switch_atom1
          WRITE(*,*) 'switch_atom2: ', switch_atom2
       ENDIF
@@ -2278,6 +2297,11 @@ CONTAINS
          CALL force_env_calc_energy_force(force_env, calc_force=.FALSE.)
          CALL force_env_get(force_env, potential_energy=new_energy)
 
+         IF (force_env%in_use == use_qs_force)  THEN
+            CALL force_env_get(force_env, qs_env=qs_env)
+            CALL get_qs_env(qs_env, energy=new_qs_energy)
+         ENDIF
+
          value = -BETA*(new_energy-old_energy)
          IF (value .GT. exp_max_val) THEN
             w=10.0_dp
@@ -2295,6 +2319,14 @@ CONTAINS
             WRITE(*,*) 'new_energy: ', new_energy
             WRITE(*,*) 'del_energy: ', new_energy - old_energy
             WRITE(*,*) 'w: ', w
+            IF (force_env%in_use == use_qs_force)  THEN
+               WRITE(*,*) 'core_overlap: ', new_qs_energy%core_overlap
+               WRITE(*,*) 'core_self: ', new_qs_energy%core_self
+               WRITE(*,*) 'core: ', new_qs_energy%core
+               WRITE(*,*) 'hartree: ', new_qs_energy%hartree
+               WRITE(*,*) 'exc: ', new_qs_energy%exc
+               WRITE(*,*) 'disp: ', new_qs_energy%dispersion
+            ENDIF
          ENDIF
       ENDIF
 
