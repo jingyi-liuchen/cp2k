@@ -1977,7 +1977,7 @@ CONTAINS
       INTEGER, DIMENSION(:), POINTER                     :: mol_type, nunits, nunits_tot, &
                                                             list_in, list_out
       INTEGER, DIMENSION(:, :), POINTER                  :: nchains
-      LOGICAL                                            :: ionode, loverlap, lerror
+      LOGICAL                                            :: ionode, loverlap1, loverlap2, lerror
       
       REAL(KIND=dp)                                      :: BETA, del_quickstep_energy, &
                                                             exp_max_val, exp_min_val, max_val, min_val, &
@@ -2272,14 +2272,16 @@ CONTAINS
       ENDIF
       
       ! check overlap for new OH3
-      CALL check_for_overlap(force_env, nchains(:, box_number), nunits(:), loverlap, mol_type(start_mol:end_mol), &
+      CALL check_for_overlap(force_env, nchains(:, box_number), nunits(:), loverlap1, mol_type(start_mol:end_mol), &
                              rmin, molecule_number=molecule_number1)
 
       ! check overlap for new OH2
-      CALL check_for_overlap(force_env, nchains(:, box_number), nunits(:), loverlap, mol_type(start_mol:end_mol), &
-                             rmin, molecule_number=molecule_number2)
+      IF (.NOT. loverlap1) THEN
+         CALL check_for_overlap(force_env, nchains(:, box_number), nunits(:), loverlap2, mol_type(start_mol:end_mol), &
+                                rmin, molecule_number=molecule_number2)
+      ENDIF
 
-      IF (loverlap) THEN
+      IF (loverlap1 .OR. loverlap2) THEN
          w = 0.0_dp
          IF (ionode) WRITE(*,*) 'overlap'
       ELSE
