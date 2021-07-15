@@ -2165,9 +2165,6 @@ CONTAINS
       OH2_old(1:3) = OH2_old(1:3)*cos_delta_theta - cross_product(k_vec, OH2_old)*sin_delta_theta &
                    + DOT_PRODUCT(k_vec, OH2_old)*(1.0_dp-cos_delta_theta)*k_vec(1:3)
 
-      ! scale  OH1_old and OH2_old
-      OH1_old(1:3) = OH1_old(1:3)/OH1_old_len*OH1_new_len
-      OH2_old(1:3) = OH2_old(1:3)/OH2_old_len*OH2_new_len
 
       ! change theta_new to theta_old
       k_vec = cross_product(OH1_new, OH2_new)
@@ -2184,15 +2181,6 @@ CONTAINS
       OH2_new(1:3) = OH2_new(1:3)*cos_delta_theta - cross_product(k_vec, OH2_new)*sin_delta_theta &
                    + DOT_PRODUCT(k_vec, OH2_new)*(1.0_dp-cos_delta_theta)*k_vec(1:3)
 
-      ! scale OH1_new and OH2_new
-      OH1_new(1:3) = OH1_new(1:3)/OH1_new_len*OH1_old_len
-      OH2_new(1:3) = OH2_new(1:3)/OH2_new_len*OH2_old_len
-
-      ! update lengths
-      OH1_old_len = SQRT(DOT_PRODUCT(OH1_old, OH1_old))
-      OH2_old_len = SQRT(DOT_PRODUCT(OH2_old, OH2_old))
-      OH1_new_len = SQRT(DOT_PRODUCT(OH1_new, OH1_new))
-      OH2_new_len = SQRT(DOT_PRODUCT(OH2_new, OH2_new))
 
       ! change coordinates of 2 remaining Hs in OH3
       OH2_mol_old(1:3, 2) = OH1_old(1:3) + OH2_mol_old(1:3, 1)
