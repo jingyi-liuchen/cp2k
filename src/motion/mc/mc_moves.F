@@ -2115,6 +2115,10 @@ CONTAINS
          DO i = 1, 3
             WRITE(*,*) r_old(:, switch_atom2+i-1)*angstrom
          ENDDO
+         WRITE(*,*) 'old config'
+         DO i = 1, SIZE(particles%els)
+            WRITE(*,*) particles%els(i)%r(1:3)*angstrom
+         ENDDO
       ENDIF
 
       ! find old length
@@ -2268,6 +2272,10 @@ CONTAINS
          WRITE(*,*) 'new OH2'
          DO i = 1, 3
             WRITE(*,*) particles%els(switch_atom2+i-1)%r(1:3)*angstrom
+         ENDDO
+         WRITE(*,*) 'new config'
+         DO i = 1, SIZE(particles%els)
+            WRITE(*,*) particles%els(i)%r(1:3)*angstrom
          ENDDO
       ENDIF
       
