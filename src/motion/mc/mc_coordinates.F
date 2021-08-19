@@ -44,7 +44,9 @@ MODULE mc_coordinates
              check_for_overlap, &
              rotate_molecule, &
              cluster_search, &
-             create_inout_list
+             create_inout_list, &
+             build_graph, &
+             breath_first_search
 
    CHARACTER(len=*), PARAMETER, PRIVATE :: moduleN = 'mc_coordinates'
 
@@ -1293,5 +1295,123 @@ CONTAINS
 
    END SUBROUTINE
 
-END MODULE mc_coordinates
 
+!> \generate graph based on hydrogen bond criteria
+!> \OO_dist max OO distance
+!> \OHO_angle minimum OHO angle
+   SUBROUTINE build_graph(nchain, nunits, mol_type, particles, abc, &
+                          nedges, edges, adjmat, OO_dist, OHO_angle)
+      INTEGER, INTENT(IN)                                :: nchain
+      INTEGER, DIMENSION(:), INTENT(IN)                  :: nunits, mol_type
+      TYPE(particle_list_type), POINTER                  :: particles
+      REAL(KIND=dp), DIMENSION(1:3), INTENT(IN)          :: abc
+      INTEGER, INTENT(OUT)                               :: nedges
+      INTEGER, DIMENSION(:, :), INTENT(OUT)              :: edges, adjmat
+      REAL(KIND=dp), INTENT(IN)                          :: OO_dist, OHO_angle
+
+      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :)     :: r
+      REAL(KIND=dp), DIMENSION(3)                        :: OO, iOH, jOH
+      REAL(KIND=dp)                                      :: OO_distsq, cos_OHO_angle, &
+                                                            drOOsq, drOO, iOH_len, jOH_len, &
+                                                            cos_angle
+      INTEGER                                            :: imol, jmol, iunit, junit
+
+      ALLOCATE (r(1:3, 1:MAXVAL(nunits), 1:nchain))
+      junit = 1 
+      DO imol = 1, nchain
+         DO iunit = 1, nunits(mol_type(imol))
+            r(1:3, iunit, imol) = particles%els(junit)%r(1:3)
+            junit = junit + 1   
+         ENDDO
+      ENDDO   
+
+      OO_distsq = OO_dist * OO_dist
+      cos_OHO_angle = COS(OHO_angle/180.0_dp*pi)
+
+      nedges = 1
+      DO imol = 1, nchain
+          DO jmol = 1, nchain
+              adjmat(jmol, imol) = 0
+          ENDDO
+      ENDDO
+
+      DO imol = 1, nchain-1
+         DO jmol = imol + 1, nchain
+            OO = r(:, 1, imol) - r(:, 1, jmol)
+            OO = OO - ANINT(OO/abc)*abc
+            drOOsq = DOT_PRODUCT(OO, OO)
+            IF (drOOsq .LE. OO_distsq) THEN
+               DO iunit = 2, nunits(mol_type(imol)) 
+                  iOH = r(:, iunit, imol) - r(:, 1, imol)
+                  jOH = r(:, iunit, imol) - r(:, 1, jmol)               
+                  iOH = iOH - ANINT(iOH/abc)*abc
+                  jOH = jOH - ANINT(jOH/abc)*abc
+                  iOH_len = SQRT(DOT_PRODUCT(iOH, iOH))
+                  jOH_len = SQRT(DOT_PRODUCT(jOH, jOH))
+                  cos_angle = DOT_PRODUCT(iOH, jOH)/iOH_len/jOH_len
+                  IF (cos_angle .LE. cos_OHO_angle) THEN
+                     !WRITE(*,*) 'imol jmol ', imol, jmol
+                     !WRITE(*,*)  SQRT(drOOsq)*angstrom, iOH_len*angstrom, jOH_len*angstrom, ACOS(cos_angle)/pi*180.0
+                     edges(1, nedges) = imol
+                     edges(2, nedges) = jmol
+                     edges(3, nedges) = iunit
+                     adjmat(jmol, imol) = 1 !outgoing edge from imol to jmol
+                     nedges = nedges + 1
+                     EXIT
+                  ENDIF
+               ENDDO
+            ENDIF
+         ENDDO
+      ENDDO 
+
+      DEALLOCATE(r)
+   END SUBROUTINE
+
+!> \DO a BFS on a graph represented by adjacent matrix
+!> \start_mol: source vertex 
+!> \member_list: molecules in the cluster
+!> \prev: predecessors to reconstruct the path 
+   SUBROUTINE breath_first_search(adjmat, nchain, start_mol, nmember, member_list, prev)
+      INTEGER, DIMENSION(:, :), INTENT(IN)              :: adjmat
+      INTEGER, INTENT(IN)                               :: nchain, start_mol
+      INTEGER, INTENT(OUT)                              :: nmember
+      INTEGER, DIMENSION(:), INTENT(OUT)                :: member_list, prev       
+      
+      INTEGER, DIMENSION(:), ALLOCATABLE                :: color
+      INTEGER, DIMENSION(1:1000)                        :: queue
+      INTEGER                                           :: ncount, i, j
+
+      ALLOCATE(color(1:nchain))
+
+      color(1:nchain) = 0
+
+      color(start_mol) = 1
+      prev(start_mol) = -1
+      queue(1) = start_mol
+
+      ! number of elements in the queue
+      ncount = 1
+      nmember = 1
+      member_list(1) = start_mol
+
+      DO WHILE (ncount .NE. 0)
+          i = queue(1)
+          queue = queue(2:ncount)
+          ncount = ncount - 1
+          DO j = 1, nchain
+              IF(adjmat(j, i) .EQ. 1 .AND. color(j) .EQ. 0) THEN
+                  color(j) = 1
+                  ncount = ncount + 1
+                  queue(ncount) = j
+
+                  nmember = nmember + 1
+                  member_list(nmember) = j
+                  prev(j) = i
+              ENDIF 
+          ENDDO
+      END DO
+     
+      DEALLOCATE(color) 
+   END SUBROUTINE   
+
+END MODULE mc_coordinates

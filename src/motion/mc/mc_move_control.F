@@ -73,6 +73,7 @@ CONTAINS
       ALLOCATE (moves%bias_cltrans)
       ALLOCATE (moves%bias_rot)
       ALLOCATE (moves%volume)
+      ALLOCATE (moves%proton_transfer)
       ALLOCATE (moves%hmc)
       ALLOCATE (moves%avbmc_inin)
       ALLOCATE (moves%avbmc_inout)
@@ -133,6 +134,9 @@ CONTAINS
       moves%volume%attempts = 0
       moves%volume%successes = 0
       moves%volume%qsuccesses = 0
+      moves%proton_transfer%attempts = 0
+      moves%proton_transfer%successes = 0
+      moves%proton_transfer%qsuccesses = 0
       moves%hmc%attempts = 0
       moves%hmc%successes = 0
       moves%hmc%qsuccesses = 0
@@ -190,6 +194,7 @@ CONTAINS
       DEALLOCATE (moves%bias_cltrans)
       DEALLOCATE (moves%bias_rot)
       DEALLOCATE (moves%volume)
+      DEALLOCATE (moves%proton_transfer)
       DEALLOCATE (moves%hmc)
       DEALLOCATE (moves%avbmc_inin)
       DEALLOCATE (moves%avbmc_inout)
@@ -246,6 +251,7 @@ CONTAINS
          moves%cltrans%qsuccesses = 0
          moves%rot%qsuccesses = 0
          moves%volume%qsuccesses = 0
+         moves%proton_transfer%qsuccesses = 0
          moves%hmc%qsuccesses = 0
          moves%qtrans_dis = 0.0E0_dp
          moves%qcltrans_dis = 0.0E0_dp
@@ -312,6 +318,8 @@ CONTAINS
                                + moves%hmc%qsuccesses
          moves%volume%successes = moves%volume%successes &
                                   + moves%volume%qsuccesses
+         moves%proton_transfer%successes = moves%proton_transfer%successes &
+                                  + moves%proton_transfer%qsuccesses
          moves%avbmc_inin%successes = moves%avbmc_inin%successes &
                                       + moves%avbmc_inin%qsuccesses
          moves%avbmc_inout%successes = moves%avbmc_inout%successes &
@@ -388,6 +396,8 @@ CONTAINS
          moves%empty_conf
       WRITE (unit, 1000) nnstep, ' volume    ', &
          moves%volume%successes, moves%volume%attempts
+      WRITE (unit, 1000) nnstep, ' proton transfer    ', &
+         moves%proton_transfer%successes, moves%proton_transfer%attempts
       WRITE (unit, 1000) nnstep, ' HMC    ', &
          moves%hmc%successes, moves%hmc%attempts
       WRITE (unit, 1000) nnstep, ' avbmc_inin  ', &

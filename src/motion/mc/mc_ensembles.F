@@ -65,7 +65,8 @@ MODULE mc_ensembles
                                               mc_hmc_move,&
                                               mc_molecule_rotation,&
                                               mc_molecule_translation,&
-                                              mc_volume_move
+                                              mc_volume_move,&
+                                              mc_proton_transfer
    USE mc_types,                        ONLY: get_mc_molecule_info,&
                                               get_mc_par,&
                                               mc_averages_p_type,&
@@ -152,7 +153,7 @@ CONTAINS
                                                             pmtrans_mol, pmvol_box
       REAL(dp), DIMENSION(:, :), POINTER                 :: conf_prob, mass
       REAL(KIND=dp)                                      :: rmin, discrete_step, pmavbmc, pmcltrans, &
-                                                            pmhmc, pmswap, pmtraion, pmtrans, &
+                                                            pmhmc, pmswap, pmproton, pmtraion, pmtrans, &
                                                             pmvolume, rand, test_energy, unit_conv
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: r_temp
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :)     :: r_old
@@ -211,7 +212,7 @@ CONTAINS
                       cell_file=cell_file(1), coords_file=coords_file(1), &
                       energy_file=energy_file(1), displacement_file=displacement_file(1), &
                       lstop=lstop, nstep=nstep, nstart=nstart, pmvolume=pmvolume, pmhmc=pmhmc, &
-                      molecules_file=molecules_file(1), pmswap=pmswap, nmoves=nmoves, &
+                      molecules_file=molecules_file(1), pmswap=pmswap, pmproton=pmproton, nmoves=nmoves, &
                       pmtraion=pmtraion, pmtrans=pmtrans, pmcltrans=pmcltrans, iuptrans=iuptrans, &
                       iupvolume=iupvolume, ldiscrete=ldiscrete, pmtraion_mol=pmtraion_mol, &
                       lbias=lbias, iprint=iprint, pmavbmc_mol=pmavbmc_mol, &
@@ -548,7 +549,22 @@ CONTAINS
                ENDDO
             ENDIF
 
-         ELSEIF (rand .LT. pmswap) THEN
+         ELSEIF (rand .LT. pmproton) THEN
+
+            IF (MOD(nnstep, iprint) == 0 .AND. (iw > 0)) THEN
+               WRITE (iw, *) "Attempting a proton transfer move"
+               WRITE (iw, *)
+            ENDIF
+            
+            box_number = 1
+            CALL mc_proton_transfer(mc_par(box_number)%mc_par, &
+                                   force_env(box_number)%force_env, &
+                                   moves(1, box_number)%moves, &
+                                   energy_check(box_number), &
+                                   r_old(:, :, box_number), old_energy(box_number), &
+                                   box_number, nnstep, rng_stream)
+
+        ELSEIF (rand .LT. pmswap) THEN
 
             ! try a swap move
             IF (MOD(nnstep, iprint) == 0 .AND. (iw > 0)) THEN

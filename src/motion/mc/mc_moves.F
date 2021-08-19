@@ -40,7 +40,9 @@ MODULE mc_moves
                                               generate_cbmc_swap_config,&
                                               get_center_of_mass,&
                                               find_mc_test_molecule,&
-                                              create_inout_list
+                                              create_inout_list,&
+                                              build_graph,&
+                                              breath_first_search
    USE mc_types,                        ONLY: get_mc_molecule_info,&
                                               get_mc_par,&
                                               mc_ekin_type,&
@@ -74,7 +76,7 @@ MODULE mc_moves
 
    PUBLIC :: mc_conformation_change, mc_molecule_translation, &
              mc_molecule_rotation, mc_volume_move, mc_avbmc_move, &
-             mc_hmc_move, mc_cluster_translation
+             mc_hmc_move, mc_cluster_translation, mc_proton_transfer
 
 CONTAINS
 
@@ -1926,6 +1928,356 @@ CONTAINS
       CALL timestop(handle)
 
    END SUBROUTINE change_dihedral
+
+! **************************************************************************************************
+!> \brief performs a proton transfer move
+!> \param mc_par the mc parameters for the force env
+!> \param force_env the force environment used in the move
+!> \param moves the structure that keeps track of how many moves have been
+!>               accepted/rejected
+!> \param energy_check the running energy difference between now and the initial
+!>        energy
+!> \param r_old the coordinates of force_env before the move
+!> \param old_energy the energy of the force_env before the move
+!> \param box_number the number of the box we're doing this move in
+!> \param nnstep current MC step
+!> \param rng_stream the random number stream that we draw from
+!> \note     Designed for parallel.
+! **************************************************************************************************
+   SUBROUTINE mc_proton_transfer(mc_par, force_env, moves, energy_check, r_old, old_energy, &
+                                box_number, nnstep, rng_stream)
+
+      TYPE(mc_simpar_type), POINTER                      :: mc_par
+      TYPE(force_env_type), POINTER                      :: force_env
+      TYPE(mc_moves_type), POINTER                       :: moves
+      REAL(KIND=dp), INTENT(INOUT)                       :: energy_check
+      REAL(KIND=dp), DIMENSION(:, :), INTENT(INOUT)      :: r_old
+      REAL(KIND=dp), INTENT(INOUT)                       :: old_energy
+      INTEGER, INTENT(IN)                                :: box_number, nnstep
+      TYPE(rng_stream_type), INTENT(INOUT)               :: rng_stream
+
+      CHARACTER(len=*), PARAMETER                        :: routineN = 'mc_proton_transfer'
+
+
+      CHARACTER, DIMENSION(10)                           :: OH3_names 
+      INTEGER                                            :: source, group, handle, &
+                                                            nmol_types, nchain, nedges, &
+                                                            nmember, start_mol, target_mol, &
+                                                            tracer, ncount, mol_index, atom_index, &
+                                                            i, j, leftO, midO, rightO, leftH, midH, &
+                                                            leftO_index, midO_index, leftH_index, &
+                                                            midH_index, firstH_index, lastH_index, &
+                                                            firstO_index, lastO_index
+      INTEGER, DIMENSION(:), POINTER                     :: mol_type, nunits, nunits_tot
+      INTEGER, DIMENSION(:, :), POINTER                  :: nchains
+      INTEGER, DIMENSION(:), ALLOCATABLE                 :: member_list, prev, path
+      INTEGER, DIMENSION(:, :), ALLOCATABLE              :: edges, adjmat
+      LOGICAL                                            :: ionode, loverlap
+
+      REAL(KIND=dp)                                      :: OO_dist, OHO_angle, rmin, BETA, &
+                                                            exp_max_val, exp_min_val, max_val, min_val, &
+                                                            new_energy, rand, w, value, &
+                                                            mid_OH1_len, mid_OH2_len 
+
+      REAL(KIND=dp), DIMENSION(1:3)                      :: abc, mid_OH1, mid_OH2, mid_H_new                                             
+      REAL(KIND=dp), DIMENSION(1:3, 1:3)                 :: OH2_mol_old, OH2_mol_new
+      TYPE(cell_type), POINTER                           :: cell
+      TYPE(cp_subsys_type), POINTER                      :: subsys
+      TYPE(mc_molecule_info_type), POINTER               :: mc_molecule_info
+      TYPE(particle_list_type), POINTER                  :: particles
+
+      CALL timeset(routineN, handle)
+ 
+      CALL get_mc_par(mc_par, rmin=rmin, &
+                      BETA=BETA, max_val=max_val, min_val=min_val, exp_max_val=exp_max_val, &
+                      exp_min_val=exp_min_val, &
+                      ionode=ionode, source=source, &
+                      group=group, mc_molecule_info=mc_molecule_info)
+      CALL get_mc_molecule_info(mc_molecule_info, nmol_types=nmol_types, nchains=nchains, nunits=nunits, &
+                                nunits_tot=nunits_tot, mol_type=mol_type)
+
+      NULLIFY (particles, subsys)
+
+      CALL force_env_get(force_env, cell=cell, subsys=subsys)
+      CALL cp_subsys_get(subsys, particles=particles)
+      CALL get_cell(cell, abc=abc)
+
+      ! allocate data structures to represent graph
+      nchain = SUM(nchains(:, box_number))
+      ALLOCATE(edges(1:3, 1:nchain*nchain), adjmat(1:nchain, 1:nchain), member_list(1:nchain), &
+              prev(1:nchain), path(1:nchain))
+
+      ! hard-coded hydrogen bond criteria
+      OO_dist = 3.3_dp/angstrom
+      OHO_angle = 120.0_dp
+
+      ! build a list of edges and adjacency matrix
+      CALL build_graph(nchain, nunits, mol_type, particles, abc, &
+                      nedges, edges, adjmat, OO_dist, OHO_angle)
+
+      ! find connected components with OH3 (molecule index 1) in it
+      start_mol = 1        
+      CALL breath_first_search(adjmat, nchain, start_mol, nmember, member_list, prev)
+
+      IF (nmember .EQ. 1) THEN
+         IF (ionode) THEN
+            WRITE(*,*) 'nmember only 1'
+         ENDIF
+         DEALLOCATE(edges, adjmat, member_list, prev, path)
+         CALL timestop(handle)
+      ENDIF
+
+      ! increment moves counter
+      moves%proton_transfer%attempts = moves%proton_transfer%attempts + 1
+
+      ! randomly select a OH2 in the cluster
+      IF (ionode) rand = rng_stream%next()
+      CALL mp_bcast(rand, source, group)
+      ! exclude target_mol itself
+      i = CEILING(rand*REAL(nmember-1, KIND=dp))
+      target_mol = member_list(i+1)
+
+      IF (ionode) THEN
+         WRITE(*, *) 'nmember: ', nmember
+         WRITE(*, *) 'target mol: ', target_mol
+      ENDIF
+      
+      ! reconstruct the path between start and target
+      ncount = 1
+      tracer = target_mol
+      path(ncount) = tracer
+      DO WHILE (tracer .NE. start_mol)
+         tracer = prev(tracer)
+         ncount = ncount + 1
+         path(ncount) = tracer
+      END DO
+
+      ! reverse the path
+      DO i = 1, ncount/2
+         j = path(i)
+         path(i) = path(ncount+1-i)
+         path(ncount+1-i) = j
+      ENDDO
+
+      OH3_names(1) = 'O'
+      OH3_names(2) = 'H'
+      OH3_names(3) = 'H'
+      OH3_names(4) = 'H'
+
+      ! output atom coordinates along the chain
+      IF (ionode) THEN
+         WRITE(*, *) 'path length: ', ncount
+         WRITE(*, *) 'old coordinates'
+         DO i = 1, ncount
+            mol_index = path(i)
+            atom_index = find_O_index(mol_index)
+            IF (mol_index .EQ. 1) THEN
+               DO j = 1, 4
+                  WRITE(*,*) OH3_names(j), particles%els(atom_index + j - 1)%r(1:3)*angstrom
+               END DO
+            ELSE
+               DO j = 1, 3
+                  WRITE(*,*) OH3_names(j), particles%els(atom_index + j - 1)%r(1:3)*angstrom
+               END DO        
+            ENDIF
+         END DO
+      ENDIF
+
+      ! flip the H of internal O
+      DO i = 2, ncount-1
+         leftO = path(i-1)
+         midO = path(i)
+         rightO = path(i+1)
+         leftH =  -1
+         midH = -1
+         ! scan through edges to find the participating H
+         DO j = 1, nedges
+            IF (edges(1, j) .EQ. leftO .AND. edges(2, j) .EQ. midO) THEN
+               leftH = edges(3, j)
+            ELSE IF (edges(1, j) .EQ. midO .AND. edges(2, j) .EQ. rightO) THEN
+               midH = edges(3, j)
+            ENDIF     
+         ENDDO
+
+         IF (leftH .EQ. -1 .OR. midH .EQ. -1) THEN
+            CPABORT('Cannot find the hydrogen in a hydrogen bond!')
+         ENDIF
+
+         ! find atom indices
+         leftO_index = find_O_index(leftO)
+         leftH_index = leftO_index + (leftH - 1)
+         midO_index =  find_O_index(midO)
+         midH_index = midO_index + (midH - 1)
+
+         ! record information for later use
+         IF (i .EQ. 2) THEN
+            firstO_index = leftO_index
+            firstH_index = leftH_index
+         ENDIF
+
+         IF (i .EQ. ncount-1) THEN  
+            lastH_index = midH_index       
+         ENDIF
+
+         ! change coordinates of H
+         mid_OH1 = r_old(1:3, midH_index) - r_old(1:3, midO_index)
+         mid_OH2 = r_old(1:3, leftH_index) - r_old(1:3, midO_index)
+         mid_OH1_len = SQRT(DOT_PRODUCT(mid_OH1, mid_OH1))
+         mid_OH2_len = SQRT(DOT_PRODUCT(mid_OH2, mid_OH2))
+         mid_OH2 = mid_OH2 / mid_OH2_len * mid_OH1_len
+         mid_H_new = mid_OH2 + r_old(1:3, midO_index)
+         particles%els(midH_index)%r(1:3) = mid_H_new(1:3)
+      ENDDO
+
+      lastO_index = find_O_index(path(ncount))
+
+      IF (ncount .EQ. 2) THEN
+         leftO = path(1)
+         midO = path(2)
+         DO j = 1, nedges
+            IF (edges(1, j) .EQ. leftO .AND. edges(2, j) .EQ. midO) THEN
+               leftH = edges(3, j)
+               EXIT
+            ENDIF
+         ENDDO
+
+         leftO_index = find_O_index(leftO)
+         leftH_index = leftO_index + (leftH - 1)
+         midO_index =  find_O_index(midO)
+
+         firstO_index = leftO_index
+         firstH_index = leftH_index
+         lastH_index = leftH_index         
+      ENDIF
+
+      IF (ionode) THEN
+         WRITE(*, *) 'first H index: ', firstH_index
+         WRITE(*, *) 'last H index: ', lastH_index
+         WRITE(*, *) 'first O index: ', firstO_index
+         WRITE(*, *) 'last O index: ', lastO_index 
+      ENDIF     
+
+      ! get the new position of last H 
+      mid_OH1 = r_old(1:3, firstH_index) - r_old(1:3, firstO_index)
+      mid_OH2 = r_old(1:3, lastH_index) - r_old(1:3, lastO_index)
+      mid_OH1_len = SQRT(DOT_PRODUCT(mid_OH1, mid_OH1))
+      mid_OH2_len = SQRT(DOT_PRODUCT(mid_OH2, mid_OH2))
+      mid_OH2 = mid_OH2 / mid_OH2_len * mid_OH1_len
+      mid_H_new = mid_OH2 + r_old(1:3, lastO_index)   
+
+      ! identity switch of terminal OH3 and OH2
+      OH2_mol_old(1:3, 1) = r_old(1:3, firstO_index)
+      j = 2
+      DO i = 1, 3
+         IF ((i+firstO_index) .EQ. firstH_index) CYCLE
+         OH2_mol_old(1:3, j) = r_old(1:3, firstO_index+i) 
+         j = j + 1
+      ENDDO
+
+      OH2_mol_new(1:3, 1:3) = r_old(1:3, lastO_index:lastO_index+2)
+
+      j = 1
+      DO i = 1, 4
+         atom_index = firstO_index + i - 1
+         IF (atom_index .EQ. firstH_index) CYCLE
+         particles%els(atom_index)%r(1:3) = OH2_mol_new(1:3, j)
+         j = j + 1
+      ENDDO
+      particles%els(firstH_index)%r(1:3) = mid_H_new(1:3)
+
+      DO i = 1, 3
+         atom_index = lastO_index + i - 1
+         particles%els(atom_index)%r(1:3) = OH2_mol_old(1:3, i)
+      ENDDO      
+
+      IF (ionode) THEN
+         WRITE(*, *) 'new coordinates'
+         DO i = 1, ncount
+            mol_index = path(i)
+            atom_index = find_O_index(mol_index)
+            IF (mol_index .EQ. 1) THEN
+               DO j = 1, 4
+                  WRITE(*,*) OH3_names(j), particles%els(atom_index + j - 1)%r(1:3)*angstrom
+               END DO
+            ELSE
+               DO j = 1, 3
+                  WRITE(*,*) OH3_names(j), particles%els(atom_index + j - 1)%r(1:3)*angstrom
+               END DO
+            ENDIF
+         END DO
+      ENDIF
+      
+      ! just in case we will check for overlap
+      CALL check_for_overlap(force_env, nchains(:, box_number), nunits(:), loverlap, mol_type(:), rmin)
+
+      IF (loverlap) THEN
+         w = 0.0_dp
+         IF (ionode) WRITE(*,*) 'overlap'
+      ELSE
+
+         CALL force_env_calc_energy_force(force_env, calc_force=.FALSE.)
+         CALL force_env_get(force_env, potential_energy=new_energy)
+
+         value = -BETA*(new_energy-old_energy)
+         IF (value .GT. exp_max_val) THEN
+            w=10.0_dp
+         ELSEIF(value .LT. exp_min_val) THEN
+            w=0.0_dp
+         ELSE
+            w=EXP(value)
+         ENDIF
+
+         IF (ionode) THEN
+            WRITE(*,*) 'old_energy: ', old_energy
+            WRITE(*,*) 'new_energy: ', new_energy
+            WRITE(*,*) 'del_energy: ', new_energy - old_energy
+            WRITE(*,*) 'w: ', w
+         ENDIF
+      ENDIF
+
+      IF (w .GE. 1.0E0_dp) THEN
+         rand = 0.0E0_dp
+      ELSE
+         IF (ionode) rand = rng_stream%next()
+         CALL mp_bcast(rand, source, group)
+      ENDIF
+
+      IF (rand .LT. w) THEN
+
+         moves%proton_transfer%successes = moves%proton_transfer%successes + 1
+
+! update energies
+         energy_check = energy_check + (new_energy - old_energy)
+         old_energy = new_energy
+
+         DO i = 1, nunits_tot(box_number)
+            r_old(1:3, i) = particles%els(i)%r(1:3)
+         ENDDO
+
+         IF (ionode) WRITE(*,*) 'accepted!'
+      ELSE
+! reject the move...need to restore the old coordinates
+         DO i = 1, nunits_tot(box_number)
+            particles%els(i)%r(1:3) = r_old(1:3, i)
+         ENDDO
+      ENDIF
+
+      DEALLOCATE(edges, adjmat, member_list, prev, path)
+      CALL timestop(handle)
+  END SUBROUTINE
+
+
+  FUNCTION find_O_index(mol_index) RESULT(atom_index)
+
+     INTEGER, INTENT(IN):: mol_index
+     INTEGER            :: atom_index
+
+     IF (mol_index .EQ. 1) THEN
+        atom_index = 1
+     ELSE
+        atom_index = 5 + 3*(mol_index-2)
+     ENDIF
+  END FUNCTION
 
 ! **************************************************************************************************
 !> \brief performs an AVBMC (intra-box swap) move
