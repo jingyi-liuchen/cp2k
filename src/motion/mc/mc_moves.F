@@ -40,9 +40,7 @@ MODULE mc_moves
                                               generate_cbmc_swap_config,&
                                               get_center_of_mass,&
                                               find_mc_test_molecule,&
-                                              create_inout_list,&
-                                              build_graph,&
-                                              breath_first_search
+                                              create_inout_list
    USE mc_types,                        ONLY: get_mc_molecule_info,&
                                               get_mc_par,&
                                               mc_ekin_type,&
@@ -68,7 +66,8 @@ MODULE mc_moves
    PRIVATE
 
    PRIVATE  :: change_bond_angle, change_bond_length, depth_first_search, &
-               change_dihedral
+               change_dihedral, breath_first_search, build_graph, find_all_paths, &
+               find_all_paths_util
 
 ! *** Global parameters ***
 
@@ -1961,23 +1960,28 @@ CONTAINS
 
       CHARACTER, DIMENSION(10)                           :: OH3_names 
       INTEGER                                            :: source, group, handle, &
-                                                            nmol_types, nchain, nedges, &
-                                                            nmember, start_mol, target_mol, &
-                                                            tracer, ncount, mol_index, atom_index, &
-                                                            i, j, leftO, midO, rightO, leftH, midH, &
+                                                            i, j, nmol_types, nchain, &
+                                                            max_depth, max_npaths, &
+                                                            nedges, nedges2, nmember, &
+                                                            nmember2, start_mol, target_mol, &
+                                                            ncount_path, ncount_path2, &
+                                                            path_len, length, tmp, &
+                                                            mol_index, atom_index, &
+                                                            leftO, midO, rightO, leftH, midH, &
                                                             leftO_index, midO_index, leftH_index, &
                                                             midH_index, firstH_index, lastH_index, &
                                                             firstO_index, lastO_index
       INTEGER, DIMENSION(:), POINTER                     :: mol_type, nunits, nunits_tot
       INTEGER, DIMENSION(:, :), POINTER                  :: nchains
-      INTEGER, DIMENSION(:), ALLOCATABLE                 :: member_list, prev, path
-      INTEGER, DIMENSION(:, :), ALLOCATABLE              :: edges, adjmat
-      LOGICAL                                            :: ionode, loverlap
+      INTEGER, DIMENSION(:), ALLOCATABLE                 :: member_list, path, member_list2, path2
+      INTEGER, DIMENSION(:, :), ALLOCATABLE              :: edges, edges2, adjmat, adjmat2, &
+                                                            all_paths, all_paths2
+      LOGICAL                                            :: ionode, loverlap, lfound
 
       REAL(KIND=dp)                                      :: OO_dist, OHO_angle, rmin, BETA, &
                                                             exp_max_val, exp_min_val, max_val, min_val, &
                                                             new_energy, rand, w, value, &
-                                                            mid_OH1_len, mid_OH2_len 
+                                                            mid_OH1_len, mid_OH2_len, prefactor
 
       REAL(KIND=dp), DIMENSION(1:3)                      :: abc, mid_OH1, mid_OH2, mid_H_new                                             
       REAL(KIND=dp), DIMENSION(1:3, 1:3)                 :: OH2_mol_old, OH2_mol_new
@@ -2002,28 +2006,33 @@ CONTAINS
       CALL cp_subsys_get(subsys, particles=particles)
       CALL get_cell(cell, abc=abc)
 
+      ! hard_coded variables
+      start_mol = 1
+      max_depth = 4
+      max_npaths = 100
+      OO_dist = 3.3_dp/angstrom
+      OHO_angle = 120.0_dp
+
       ! allocate data structures to represent graph
       nchain = SUM(nchains(:, box_number))
       ALLOCATE(edges(1:3, 1:nchain*nchain), adjmat(1:nchain, 1:nchain), member_list(1:nchain), &
-              prev(1:nchain), path(1:nchain))
-
-      ! hard-coded hydrogen bond criteria
-      OO_dist = 3.3_dp/angstrom
-      OHO_angle = 120.0_dp
+               path(1:nchain), all_paths(max_depth+2, max_npaths), &
+               edges2(1:3, 1:nchain*nchain), adjmat2(1:nchain, 1:nchain), member_list2(1:nchain), &
+               path2(1:nchain), all_paths2(max_depth+2, max_npaths))
 
       ! build a list of edges and adjacency matrix
       CALL build_graph(nchain, nunits, mol_type, particles, abc, &
                       nedges, edges, adjmat, OO_dist, OHO_angle)
 
-      ! find connected components with OH3 (molecule index 1) in it
-      start_mol = 1        
-      CALL breath_first_search(adjmat, nchain, start_mol, nmember, member_list, prev)
+      ! find nodes that are max_depth hops away from start mol
+      CALL breath_first_search(adjmat, nchain, start_mol, max_depth, nmember, member_list)
 
       IF (nmember .EQ. 1) THEN
          IF (ionode) THEN
             WRITE(*,*) 'nmember only 1'
          ENDIF
-         DEALLOCATE(edges, adjmat, member_list, prev, path)
+         DEALLOCATE(edges, adjmat, member_list, path, all_paths, &
+                    edges2, adjmat2, member_list2, path2, all_paths2)
          CALL timestop(handle)
       ENDIF
 
@@ -2038,26 +2047,38 @@ CONTAINS
       target_mol = member_list(i+1)
 
       IF (ionode) THEN
+         WRITE(*, *) 'nedges: ' , nedges
+         !DO i = 1, nedges
+         !   WRITE(*, *) edges(1:3, i)
+         !ENDDO
          WRITE(*, *) 'nmember: ', nmember
+         !WRITE(*, *) 'member list: ', member_list(1:nmember)
          WRITE(*, *) 'target mol: ', target_mol
       ENDIF
-      
-      ! reconstruct the path between start and target
-      ncount = 1
-      tracer = target_mol
-      path(ncount) = tracer
-      DO WHILE (tracer .NE. start_mol)
-         tracer = prev(tracer)
-         ncount = ncount + 1
-         path(ncount) = tracer
-      END DO
 
-      ! reverse the path
-      DO i = 1, ncount/2
-         j = path(i)
-         path(i) = path(ncount+1-i)
-         path(ncount+1-i) = j
-      ENDDO
+      ! find all paths between start mol and target mol with max number of hops equal max_depth
+      ncount_path = 0
+      CALL find_all_paths(adjmat, nchain, start_mol, target_mol, max_depth, ncount_path, all_paths)
+
+      IF (ncount_path .LE. 0) THEN
+          CPABORT('No forward path found!')
+      ENDIF
+
+      IF (ionode) THEN
+         WRITE(*, *) 'max number of hops: ', max_depth
+         WRITE(*, *) 'number of paths: ' , ncount_path
+         DO i = 1, ncount_path
+            length = all_paths(1, i)
+            WRITE(*, *) 'path ', i, ': ', all_paths(2:length+1, i)
+         END DO
+      ENDIF
+
+      ! randomly select a path
+      IF (ionode) rand = rng_stream%next()
+      CALL mp_bcast(rand, source, group)
+      i =  CEILING(rand*REAL(ncount_path, KIND=dp))
+      path_len = all_paths(1, i)
+      path(1:path_len) = all_paths(2:path_len+1, i)
 
       OH3_names(1) = 'O'
       OH3_names(2) = 'H'
@@ -2066,9 +2087,10 @@ CONTAINS
 
       ! output atom coordinates along the chain
       IF (ionode) THEN
-         WRITE(*, *) 'path length: ', ncount
+         WRITE(*, *) 'selected path length: ', path_len
+         WRITE(*, *) 'selected path: ', path(1:path_len)
          WRITE(*, *) 'old coordinates'
-         DO i = 1, ncount
+         DO i = 1, path_len
             mol_index = path(i)
             atom_index = find_O_index(mol_index)
             IF (mol_index .EQ. 1) THEN
@@ -2084,7 +2106,7 @@ CONTAINS
       ENDIF
 
       ! flip the H of internal O
-      DO i = 2, ncount-1
+      DO i = 2, path_len-1
          leftO = path(i-1)
          midO = path(i)
          rightO = path(i+1)
@@ -2115,23 +2137,24 @@ CONTAINS
             firstH_index = leftH_index
          ENDIF
 
-         IF (i .EQ. ncount-1) THEN  
+         IF (i .EQ. path_len-1) THEN
             lastH_index = midH_index       
          ENDIF
 
          ! change coordinates of H
          mid_OH1 = r_old(1:3, midH_index) - r_old(1:3, midO_index)
          mid_OH2 = r_old(1:3, leftH_index) - r_old(1:3, midO_index)
+         mid_OH1 = mid_OH1 - ANINT(mid_OH1/abc)*abc
+         mid_OH2 = mid_OH2 - ANINT(mid_OH2/abc)*abc
          mid_OH1_len = SQRT(DOT_PRODUCT(mid_OH1, mid_OH1))
          mid_OH2_len = SQRT(DOT_PRODUCT(mid_OH2, mid_OH2))
          mid_OH2 = mid_OH2 / mid_OH2_len * mid_OH1_len
          mid_H_new = mid_OH2 + r_old(1:3, midO_index)
          particles%els(midH_index)%r(1:3) = mid_H_new(1:3)
       ENDDO
+      lastO_index = find_O_index(path(path_len))
 
-      lastO_index = find_O_index(path(ncount))
-
-      IF (ncount .EQ. 2) THEN
+      IF (path_len .EQ. 2) THEN
          leftO = path(1)
          midO = path(2)
          DO j = 1, nedges
@@ -2160,6 +2183,8 @@ CONTAINS
       ! get the new position of last H 
       mid_OH1 = r_old(1:3, firstH_index) - r_old(1:3, firstO_index)
       mid_OH2 = r_old(1:3, lastH_index) - r_old(1:3, lastO_index)
+      mid_OH1 = mid_OH1 - ANINT(mid_OH1/abc)*abc
+      mid_OH2 = mid_OH2 - ANINT(mid_OH2/abc)*abc
       mid_OH1_len = SQRT(DOT_PRODUCT(mid_OH1, mid_OH1))
       mid_OH2_len = SQRT(DOT_PRODUCT(mid_OH2, mid_OH2))
       mid_OH2 = mid_OH2 / mid_OH2_len * mid_OH1_len
@@ -2176,6 +2201,7 @@ CONTAINS
 
       OH2_mol_new(1:3, 1:3) = r_old(1:3, lastO_index:lastO_index+2)
 
+      ! update coordinates of OH3
       j = 1
       DO i = 1, 4
          atom_index = firstO_index + i - 1
@@ -2185,6 +2211,7 @@ CONTAINS
       ENDDO
       particles%els(firstH_index)%r(1:3) = mid_H_new(1:3)
 
+      ! update coordinates of OH2
       DO i = 1, 3
          atom_index = lastO_index + i - 1
          particles%els(atom_index)%r(1:3) = OH2_mol_old(1:3, i)
@@ -2192,7 +2219,7 @@ CONTAINS
 
       IF (ionode) THEN
          WRITE(*, *) 'new coordinates'
-         DO i = 1, ncount
+         DO i = 1, path_len
             mol_index = path(i)
             atom_index = find_O_index(mol_index)
             IF (mol_index .EQ. 1) THEN
@@ -2211,8 +2238,101 @@ CONTAINS
       CALL check_for_overlap(force_env, nchains(:, box_number), nunits(:), loverlap, mol_type(:), rmin)
 
       IF (loverlap) THEN
+         IF (ionode) THEN
+            WRITE(*, *) 'overlap in new configuration!'
+         ENDIF
+      ENDIF
+
+      ! build graph after move
+      CALL build_graph(nchain, nunits, mol_type, particles, abc, &
+                       nedges2, edges2, adjmat2, OO_dist, OHO_angle)
+
+      IF (ionode) THEN
+         WRITE(*, *) '# new edges: ', nedges2
+         !DO i = 1, nedges2
+         !   WRITE(*, *) edges2(1:3 , i)
+         !ENDDO
+      ENDIF
+
+      ! check that number of edges did not change
+      IF (nedges .NE. nedges2) THEN
+         IF (ionode) THEN
+            WRITE(*, *) 'nedges not consistent!'
+            WRITE(*, *) '# old edges: ', nedges
+            DO i = 1, nedges
+               WRITE(*, *) edges(1:3 , i)
+            ENDDO
+            WRITE(*, *) '# new edges: ', nedges2
+            DO i = 1, nedges2
+               WRITE(*, *) edges2(1:3 , i)
+            ENDDO
+         ENDIF
+         CPABORT('Number of edges is not consistent!')
+      ENDIF
+
+      CALL breath_first_search(adjmat2, nchain, start_mol, max_depth, nmember2, member_list2)
+      IF (ionode) THEN
+         WRITE(*, *) 'nmember2: ', nmember2
+         !WRITE(*, *) 'member_list2: ', member_list2(1:nmember2)
+      ENDIF
+
+      ! check target mol in member list2
+      lfound = .FALSE.
+      DO i = 1, nmember2
+         IF (member_list2(i) .EQ. target_mol) THEN
+            lfound = .TRUE.
+            EXIT
+         ENDIF
+      ENDDO
+
+      IF (.NOT. lfound) THEN
+         CPABORT('Did not find target mol in member list for reverse move!')
+      ENDIF
+
+      ! find all paths between start mol and target mol
+      ncount_path2 = 0
+      CALL find_all_paths(adjmat2, nchain, start_mol, target_mol, max_depth, ncount_path2, all_paths2)
+      IF (ncount_path2 .LE. 0) THEN
+          CPABORT('No forward path found!')
+      ENDIF
+
+      IF (ionode) THEN
+         WRITE(*, *) 'number of paths reverse: ' , ncount_path2
+         DO i = 1, ncount_path2
+            length = all_paths2(1, i)
+            ! swap source and destination
+            tmp = all_paths2(length+1, i)
+            all_paths2(length+1, i) = all_paths2(2, i)
+            all_paths2(2, i) = tmp
+            WRITE(*, *) 'path ', i, ': ', all_paths2(2:length+1, i)
+         ENDDO
+      ENDIF
+
+      ! check reverse path exists
+      lfound = .FALSE.
+      DO i = 1, ncount_path2
+         length = all_paths2(1, i)
+         IF (length .EQ. path_len) THEN
+            path2(1:length) = all_paths2(2:length+1, i)
+            DO j = 1, length
+               IF(path2(j) .NE. path(length+1-j)) EXIT
+            ENDDO
+
+            IF (j .EQ. length+1) THEN
+               lfound = .TRUE.
+               EXIT
+            ENDIF
+         ENDIF
+      ENDDO
+
+      IF (.NOT. lfound) THEN
+         CPABORT('Did not find reverse path!')
+      ENDIF
+
+      prefactor = (REAL(nmember, dp)/nmember2)*(REAL(ncount_path)/ncount_path2)
+
+      IF (loverlap) THEN
          w = 0.0_dp
-         IF (ionode) WRITE(*,*) 'overlap'
       ELSE
 
          CALL force_env_calc_energy_force(force_env, calc_force=.FALSE.)
@@ -2224,10 +2344,11 @@ CONTAINS
          ELSEIF(value .LT. exp_min_val) THEN
             w=0.0_dp
          ELSE
-            w=EXP(value)
+            w=EXP(value)*prefactor
          ENDIF
 
          IF (ionode) THEN
+            WRITE(*,*) 'prefactor: ' , prefactor
             WRITE(*,*) 'old_energy: ', old_energy
             WRITE(*,*) 'new_energy: ', new_energy
             WRITE(*,*) 'del_energy: ', new_energy - old_energy
@@ -2262,7 +2383,9 @@ CONTAINS
          ENDDO
       ENDIF
 
-      DEALLOCATE(edges, adjmat, member_list, prev, path)
+      DEALLOCATE(edges, adjmat, member_list, path, all_paths, &
+                 edges2, adjmat2, member_list2, path2, all_paths2)
+
       CALL timestop(handle)
   END SUBROUTINE
 
@@ -2278,6 +2401,216 @@ CONTAINS
         atom_index = 5 + 3*(mol_index-2)
      ENDIF
   END FUNCTION
+
+!> \generate graph based on hydrogen bond criteria
+!> \OO_dist max OO distance
+!> \OHO_angle minimum OHO angle
+   SUBROUTINE build_graph(nchain, nunits, mol_type, particles, abc, &
+                          nedges, edges, adjmat, OO_dist, OHO_angle)
+      INTEGER, INTENT(IN)                                :: nchain
+      INTEGER, DIMENSION(:), INTENT(IN)                  :: nunits, mol_type
+      TYPE(particle_list_type), POINTER                  :: particles
+      REAL(KIND=dp), DIMENSION(1:3), INTENT(IN)          :: abc
+      INTEGER, INTENT(OUT)                               :: nedges
+      INTEGER, DIMENSION(:, :), INTENT(OUT)              :: edges, adjmat
+      REAL(KIND=dp), INTENT(IN)                          :: OO_dist, OHO_angle
+
+      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :)     :: r
+      REAL(KIND=dp), DIMENSION(3)                        :: OO, iOH, jOH
+      REAL(KIND=dp)                                      :: OO_distsq, cos_OHO_angle, &
+                                                            drOOsq, drOO, iOH_len, jOH_len, &
+                                                            cos_angle
+      INTEGER                                            :: imol, jmol, iunit, junit
+
+      ALLOCATE (r(1:3, 1:MAXVAL(nunits), 1:nchain))
+      junit = 0
+      DO imol = 1, nchain
+         DO iunit = 1, nunits(mol_type(imol))
+            junit = junit + 1
+            r(1:3, iunit, imol) = particles%els(junit)%r(1:3)
+         ENDDO
+      ENDDO
+
+      OO_distsq = OO_dist * OO_dist
+      cos_OHO_angle = COS(OHO_angle/180.0_dp*pi)
+
+      nedges = 0
+      DO imol = 1, nchain
+          DO jmol = 1, nchain
+              adjmat(jmol, imol) = 0
+          ENDDO
+      ENDDO
+
+      DO imol = 1, nchain-1
+         DO jmol = imol + 1, nchain
+            OO = r(:, 1, imol) - r(:, 1, jmol)
+            OO = OO - ANINT(OO/abc)*abc
+            drOOsq = DOT_PRODUCT(OO, OO)
+            IF (drOOsq .LE. OO_distsq) THEN
+               ! imol is donor
+               DO iunit = 2, nunits(mol_type(imol))
+                  iOH = r(:, iunit, imol) - r(:, 1, imol)
+                  jOH = r(:, iunit, imol) - r(:, 1, jmol)
+                  iOH = iOH - ANINT(iOH/abc)*abc
+                  jOH = jOH - ANINT(jOH/abc)*abc
+                  iOH_len = SQRT(DOT_PRODUCT(iOH, iOH))
+                  jOH_len = SQRT(DOT_PRODUCT(jOH, jOH))
+                  cos_angle = DOT_PRODUCT(iOH, jOH)/iOH_len/jOH_len
+                  IF (cos_angle .LE. cos_OHO_angle) THEN
+                     !WRITE(*,*) 'imol jmol ', imol, jmol
+                     !WRITE(*,*)  SQRT(drOOsq)*angstrom, iOH_len*angstrom, jOH_len*angstrom, ACOS(cos_angle)/pi*180.0
+                     nedges = nedges + 1
+                     edges(1, nedges) = imol
+                     edges(2, nedges) = jmol
+                     edges(3, nedges) = iunit
+                     adjmat(jmol, imol) = 1 !outgoing edge from imol to jmol
+                     EXIT
+                  ENDIF
+               ENDDO
+
+               ! jmol is donor
+               DO junit = 2, nunits(mol_type(jmol))
+                  iOH = r(:, junit, jmol) - r(:, 1, imol)
+                  jOH = r(:, junit, jmol) - r(:, 1, jmol)
+                  iOH = iOH - ANINT(iOH/abc)*abc
+                  jOH = jOH - ANINT(jOH/abc)*abc
+                  iOH_len = SQRT(DOT_PRODUCT(iOH, iOH))
+                  jOH_len = SQRT(DOT_PRODUCT(jOH, jOH))
+                  cos_angle = DOT_PRODUCT(iOH, jOH)/iOH_len/jOH_len
+                  IF (cos_angle .LE. cos_OHO_angle) THEN
+                     !WRITE(*,*) 'imol jmol ', imol, jmol
+                     !WRITE(*,*)  SQRT(drOOsq)*angstrom, iOH_len*angstrom, jOH_len*angstrom, ACOS(cos_angle)/pi*180.0
+                     nedges = nedges + 1
+                     edges(1, nedges) = jmol
+                     edges(2, nedges) = imol
+                     edges(3, nedges) = junit
+                     adjmat(imol, jmol) = 1 !outgoing edge from imol to jmol
+                     EXIT
+                  ENDIF
+               ENDDO
+            ENDIF
+         ENDDO
+      ENDDO
+
+      DEALLOCATE(r)
+   END SUBROUTINE
+
+!> \DO a BFS on a graph represented by adjacent matrix
+!> \start_mol: source vertex
+!> \member_list: molecules in the cluster
+   SUBROUTINE breath_first_search(adjmat, nchain, start_mol, max_depth, nmember, member_list)
+      INTEGER, DIMENSION(:, :), INTENT(IN)              :: adjmat
+      INTEGER, INTENT(IN)                               :: nchain, start_mol, max_depth
+      INTEGER, INTENT(OUT)                              :: nmember
+      INTEGER, DIMENSION(:), INTENT(OUT)                :: member_list
+
+      INTEGER, DIMENSION(:), ALLOCATABLE                :: visited
+      INTEGER, DIMENSION(1:1000)                        :: queue, depth_queue
+      INTEGER                                           :: ncount, depth, i, j
+
+      ALLOCATE(visited(1:nchain))
+
+      visited(1:nchain) = 0
+      visited(start_mol) = 1
+
+      queue(1) = start_mol
+      depth_queue(1) = 0
+
+      ! number of elements in the queue
+      ncount = 1
+      nmember = 1
+      member_list(1) = start_mol
+
+      DO WHILE (ncount .NE. 0)
+          i = queue(1)
+          depth = depth_queue(1)
+          IF (depth .EQ. max_depth) EXIT
+
+          queue = queue(2:ncount)
+          depth_queue = depth_queue(2:ncount)
+          ncount = ncount - 1
+          DO j = 1, nchain
+              IF(adjmat(j, i) .EQ. 1 .AND. visited(j) .EQ. 0) THEN
+                  visited(j) = 1
+                  ncount = ncount + 1
+                  queue(ncount) = j
+                  depth_queue(ncount) = depth + 1
+                  nmember = nmember + 1
+                  member_list(nmember) = j
+              ENDIF
+          ENDDO
+      END DO
+
+      DEALLOCATE(visited)
+   END SUBROUTINE
+ 
+   SUBROUTINE find_all_paths(adjmat, nchain, start_mol, target_mol, max_depth, ncount_path, all_paths)
+      INTEGER, DIMENSION(:, :), INTENT(IN)              :: adjmat
+      INTEGER, INTENT(IN)                               :: nchain, target_mol,  max_depth
+      INTEGER, INTENT(INOUT)                            :: start_mol, ncount_path
+      INTEGER, DIMENSION(:, :), INTENT(INOUT)           :: all_paths
+      INTEGER, DIMENSION(:), ALLOCATABLE                :: visited, path
+
+      INTEGER                                           :: path_index
+
+      ALLOCATE(visited(1:nchain), path(1:nchain))
+
+      visited(1:nchain) = 0
+
+      path_index = 0
+
+      CALL find_all_paths_util(adjmat, nchain, start_mol, target_mol, max_depth, ncount_path, all_paths, &
+                               visited, path_index, path)
+
+      DEALLOCATE(visited, path)
+   END SUBROUTINE
+
+   RECURSIVE SUBROUTINE find_all_paths_util(adjmat, nchain, start_mol, target_mol, max_depth, ncount_path, all_paths, &
+                                            visited, path_index, path)
+
+      INTEGER, DIMENSION(:, :), INTENT(IN)              :: adjmat
+      INTEGER, INTENT(IN)                               :: nchain, target_mol,  max_depth
+      INTEGER, DIMENSION(:), INTENT(INOUT)              :: visited, path
+      INTEGER, INTENT(INOUT)                            :: start_mol, path_index, ncount_path
+      INTEGER, DIMENSION(:, :), INTENT(INOUT)           :: all_paths
+
+      INTEGER                                           :: i, j
+
+      !WRITE(*, *) 'start_mol, target_mol, path_index: ', start_mol, target_mol, path_index
+
+      path_index = path_index + 1
+
+      IF (path_index .GT. (max_depth+1)) THEN
+         path_index = path_index - 1
+         visited(start_mol) = 0
+         RETURN
+      ENDIF
+
+      visited(start_mol) = 1
+      path(path_index) = start_mol
+
+      IF (start_mol .EQ. target_mol) THEN
+         !WRITE(*, *) 'found path'
+         !DO i = 1, path_index
+         !   WRITE(*, *) path(i)
+         !END DO
+         ncount_path = ncount_path + 1
+         all_paths(1, ncount_path) = path_index
+         all_paths(2:path_index+1, ncount_path) = path(1:path_index)
+      ELSE
+         DO i = 1, nchain
+            IF (adjmat(i, start_mol) .EQ. 1 .AND. visited(i) .EQ. 0) THEN
+              !WRITE(*, *) 'neighbor ', i
+              CALL find_all_paths_util(adjmat, nchain, i, target_mol, max_depth, ncount_path, all_paths, &
+                        visited, path_index, path)
+            END IF
+         ENDDO
+      ENDIF
+
+      path_index = path_index - 1
+      visited(start_mol) = 0
+
+   END SUBROUTINE
 
 ! **************************************************************************************************
 !> \brief performs an AVBMC (intra-box swap) move
