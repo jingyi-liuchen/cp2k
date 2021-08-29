@@ -2298,15 +2298,16 @@ CONTAINS
 
       IF (ionode) THEN
          WRITE(*, *) 'number of paths reverse: ' , ncount_path2
-         DO i = 1, ncount_path2
-            length = all_paths2(1, i)
-            ! swap source and destination
-            tmp = all_paths2(length+1, i)
-            all_paths2(length+1, i) = all_paths2(2, i)
-            all_paths2(2, i) = tmp
-            WRITE(*, *) 'path ', i, ': ', all_paths2(2:length+1, i)
-         ENDDO
       ENDIF
+
+      DO i = 1, ncount_path2
+         length = all_paths2(1, i)
+         ! swap source and destination
+         tmp = all_paths2(length+1, i)
+         all_paths2(length+1, i) = all_paths2(2, i)
+         all_paths2(2, i) = tmp
+         IF (ionode) WRITE(*, *) 'path ', i, ': ', all_paths2(2:length+1, i)
+      ENDDO
 
       ! check reverse path exists
       lfound = .FALSE.
