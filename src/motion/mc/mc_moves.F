@@ -2267,7 +2267,6 @@ CONTAINS
                WRITE(*, *) edges2(1:3 , i)
             ENDDO
          ENDIF
-         CPABORT('Number of edges is not consistent!')
       ENDIF
 
       CALL breath_first_search(adjmat2, nchain, start_mol, max_depth, nmember2, member_list2)
