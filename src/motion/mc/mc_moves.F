@@ -2047,6 +2047,7 @@ CONTAINS
       target_mol = member_list(i+1)
 
       IF (ionode) THEN
+         WRITE(*, *) 'step: ', nnstep
          WRITE(*, *) 'nedges: ' , nedges
          !DO i = 1, nedges
          !   WRITE(*, *) edges(1:3, i)
