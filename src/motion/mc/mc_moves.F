@@ -75,7 +75,8 @@ MODULE mc_moves
 
    PUBLIC :: mc_conformation_change, mc_molecule_translation, &
              mc_molecule_rotation, mc_volume_move, mc_avbmc_move, &
-             mc_hmc_move, mc_cluster_translation, mc_proton_transfer
+             mc_hmc_move, mc_cluster_translation, mc_proton_transfer, &
+             mc_bond_exchange
 
 CONTAINS
 
@@ -1927,6 +1928,246 @@ CONTAINS
       CALL timestop(handle)
 
    END SUBROUTINE change_dihedral
+
+
+
+! **************************************************************************************************
+!> \brief performs a bond exchange move within OH3
+!> \param mc_par the mc parameters for the force env
+!> \param force_env the force environment used in the move
+!> \param moves the structure that keeps track of how many moves have been
+!>               accepted/rejected
+!> \param energy_check the running energy difference between now and the initial
+!>        energy
+!> \param r_old the coordinates of force_env before the move
+!> \param old_energy the energy of the force_env before the move
+!> \param box_number the number of the box we're doing this move in
+!> \param nnstep current MC step
+!> \param rng_stream the random number stream that we draw from
+!> \note     Designed for parallel.
+! **************************************************************************************************
+   SUBROUTINE mc_bond_exchange(mc_par, force_env, moves, energy_check, r_old, old_energy, &
+                               box_number, nnstep, rng_stream)
+
+      TYPE(mc_simpar_type), POINTER                      :: mc_par
+      TYPE(force_env_type), POINTER                      :: force_env
+      TYPE(mc_moves_type), POINTER                       :: moves
+      REAL(KIND=dp), INTENT(INOUT)                       :: energy_check
+      REAL(KIND=dp), DIMENSION(:, :), INTENT(INOUT)      :: r_old
+      REAL(KIND=dp), INTENT(INOUT)                       :: old_energy
+      INTEGER, INTENT(IN)                                :: box_number, nnstep
+      TYPE(rng_stream_type), INTENT(INOUT)               :: rng_stream
+
+      CHARACTER(len=*), PARAMETER                        :: routineN = 'mc_bond_exchange'
+
+      CHARACTER, DIMENSION(10)                           :: OH3_names
+      LOGICAL                                            :: ionode, loverlap
+
+      INTEGER                                            :: source, group, handle, nmol_types, &
+                                                            nchain, imol, jmol, iunit, junit, &
+                                                            max_H, tmp, ex_H
+      INTEGER, DIMENSION(2)                              :: other_2H
+      INTEGER, DIMENSION(:), POINTER                     :: mol_type, nunits, nunits_tot
+      INTEGER, DIMENSION(:, :), POINTER                  :: nchains
+
+      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :)     :: r
+      REAL(KIND=dp), DIMENSION(3)                        :: abc, OO, iOH, jOH, all_bonds
+      REAL(KIND=dp)                                      :: exp_max_val, exp_min_val, max_val, min_val, &
+                                                            rmin, BETA, new_energy, rand, w, value, &
+                                                            OO_dist, OHO_angle, OO_distsq, &
+                                                            cos_OHO_angle, &
+                                                            drOOsq, iOH_len, jOH_len, cos_angle, &
+                                                            max_OH_len, ex_OH_len
+
+      TYPE(cell_type), POINTER                           :: cell
+      TYPE(cp_subsys_type), POINTER                      :: subsys
+      TYPE(mc_molecule_info_type), POINTER               :: mc_molecule_info
+      TYPE(particle_list_type), POINTER                  :: particles
+
+      CALL timeset(routineN, handle)
+
+      CALL get_mc_par(mc_par, rmin=rmin, &
+                      BETA=BETA, max_val=max_val, min_val=min_val, exp_max_val=exp_max_val, &
+                      exp_min_val=exp_min_val, &
+                      ionode=ionode, source=source, &
+                      group=group, mc_molecule_info=mc_molecule_info)
+      CALL get_mc_molecule_info(mc_molecule_info, nmol_types=nmol_types, nchains=nchains, nunits=nunits, &
+                                nunits_tot=nunits_tot, mol_type=mol_type)
+
+      NULLIFY (particles, subsys)
+
+      CALL force_env_get(force_env, cell=cell, subsys=subsys)
+      CALL cp_subsys_get(subsys, particles=particles)
+      CALL get_cell(cell, abc=abc)
+
+      moves%bond_exc%attempts = moves%bond_exc%attempts + 1
+
+      ! hard-coded variables
+      OO_dist = 3.3_dp/angstrom
+      OHO_angle = 120.0_dp
+      OH3_names(1) = 'O'
+      OH3_names(2) = 'H'
+      OH3_names(3) = 'H'
+      OH3_names(4) = 'H'
+
+      OO_distsq = OO_dist*OO_dist
+      cos_OHO_angle = COS(OHO_angle/180.0_dp*pi)
+      nchain = SUM(nchains(:, box_number))
+
+      ! reorganize coordinates
+      ALLOCATE (r(1:3, 1:MAXVAL(nunits), 1:nchain))
+      junit = 0
+      DO imol = 1, nchain
+         DO iunit = 1, nunits(mol_type(imol))
+            junit = junit + 1
+            r(1:3, iunit, imol) = particles%els(junit)%r(1:3)
+         ENDDO
+      ENDDO
+
+      ! find the longest OH bond
+      imol = 1
+      max_H = -1
+      max_OH_len = -1
+      DO iunit = 2, nunits(mol_type(imol))
+         iOH = r(:, iunit, imol) - r(:, 1, imol)
+         iOH = iOH - ANINT(iOH/abc)*abc
+         iOH_len = SQRT(DOT_PRODUCT(iOH, iOH))
+         all_bonds(iunit-1) = iOH_len
+         IF (iOH_len .GT. max_OH_len) THEN
+            max_OH_len = iOH_len
+            max_H = iunit
+         ENDIF
+      ENDDO
+
+      IF (ionode) THEN
+         WRITE(*, *) 'step: ', nnstep
+         WRITE(*, *) 'max_H: ' , max_H
+         WRITE(*, *) 'max_OH_len: ', max_OH_len*angstrom
+      ENDIF
+
+      junit = 0
+      DO iunit = 2, nunits(mol_type(imol))
+          IF (iunit .EQ. max_H) CYCLE
+          junit = junit + 1
+          other_2H(junit) = iunit
+      ENDDO
+
+      ! randomly select one of the other two OH bonds to exchange with
+      IF (ionode) rand = rng_stream%next()
+      CALL mp_bcast(rand, source, group)
+      tmp = CEILING(rand*REAL(2, KIND=dp))
+      ex_H = other_2H(tmp)
+      ex_OH_len = all_bonds(ex_H-1)
+
+      IF (ionode) THEN
+         WRITE(*, *) 'ex_H: ' , ex_H
+         WRITE(*, *) 'ex_OH_len: ', ex_OH_len*angstrom
+         WRITE(*, *) 'old coordinates'
+         DO iunit = 1, 4
+            WRITE(*,*) OH3_names(iunit), particles%els(iunit)%r(1:3)*angstrom
+         END DO
+      ENDIF
+
+      ! exchange bonds (iOH: max bond, jOH: exchange bond)
+      iOH = r(:, max_H, imol) - r(:, 1, imol)
+      iOH = iOH - ANINT(iOH/abc)*abc
+      jOH = r(:, ex_H, imol) - r(:, 1, imol)
+      jOH = jOH - ANINT(jOH/abc)*abc
+
+      iOH = iOH/max_OH_len*ex_OH_len
+      jOH = jOH/ex_OH_len*max_OH_len
+      particles%els(max_H)%r(1:3) = particles%els(1)%r(1:3) + iOH(1:3)
+      particles%els(ex_H)%r(1:3) = particles%els(1)%r(1:3) + jOH(1:3)
+
+      IF (ionode) THEN
+         WRITE(*, *) 'new coordinates'
+         DO iunit = 1, 4
+            WRITE(*,*) OH3_names(iunit), particles%els(iunit)%r(1:3)*angstrom
+         END DO
+      ENDIF
+
+      ! find the OH2 molecules that are hydrogen bonded to OH3
+      imol = 1
+      DO jmol = 2, nchain
+         OO = r(:, 1, imol) - r(:, 1, jmol)
+         OO = OO - ANINT(OO/abc)*abc
+         drOOsq = DOT_PRODUCT(OO, OO)
+         IF (drOOsq .LE. OO_distsq) THEN
+            DO iunit = 2, nunits(mol_type(imol))
+               iOH = r(:, iunit, imol) - r(:, 1, imol)
+               jOH = r(:, iunit, imol) - r(:, 1, jmol)
+               iOH = iOH - ANINT(iOH/abc)*abc
+               jOH = jOH - ANINT(jOH/abc)*abc
+               iOH_len = SQRT(DOT_PRODUCT(iOH, iOH))
+               jOH_len = SQRT(DOT_PRODUCT(jOH, jOH))
+               cos_angle = DOT_PRODUCT(iOH, jOH)/iOH_len/jOH_len
+               IF (cos_angle .LE. cos_OHO_angle) THEN
+                  IF (ionode) THEN
+                     WRITE(*,*) 'imol jmol iunit OOdist angle_OHO: ', &
+                                 imol, jmol, iunit, SQRT(drOOsq)*angstrom, ACOS(cos_angle)/pi*180.0_dp
+                  ENDIF
+               ENDIF
+            ENDDO
+         ENDIF
+      ENDDO
+
+      CALL check_for_overlap(force_env, nchains(:, box_number), nunits(:), loverlap, mol_type(:), rmin)
+
+      IF (loverlap) THEN
+         w = 0.0_dp
+         IF (ionode) WRITE(*, *) 'overlap in new config'
+      ELSE
+
+         CALL force_env_calc_energy_force(force_env, calc_force=.FALSE.)
+         CALL force_env_get(force_env, potential_energy=new_energy)
+
+         value = -BETA*(new_energy-old_energy)
+         IF (value .GT. exp_max_val) THEN
+            w=10.0_dp
+         ELSEIF(value .LT. exp_min_val) THEN
+            w=0.0_dp
+         ELSE
+            w=EXP(value)
+         ENDIF
+
+         IF (ionode) THEN
+            WRITE(*,*) 'old_energy: ', old_energy
+            WRITE(*,*) 'new_energy: ', new_energy
+            WRITE(*,*) 'del_energy: ', new_energy - old_energy
+            WRITE(*,*) 'w: ', w
+         ENDIF
+      ENDIF
+
+      IF (w .GE. 1.0E0_dp) THEN
+         rand = 0.0E0_dp
+      ELSE
+         IF (ionode) rand = rng_stream%next()
+         CALL mp_bcast(rand, source, group)
+      ENDIF
+
+      IF (rand .LT. w) THEN
+
+         moves%bond_exc%successes = moves%bond_exc%successes + 1
+
+! update energies
+         energy_check = energy_check + (new_energy - old_energy)
+         old_energy = new_energy
+
+         DO iunit = 1, nunits_tot(box_number)
+            r_old(1:3, iunit) = particles%els(iunit)%r(1:3)
+         ENDDO
+
+         IF (ionode) WRITE(*,*) 'accepted!'
+      ELSE
+! reject the move...need to restore the old coordinates
+         DO iunit = 1, nunits_tot(box_number)
+            particles%els(iunit)%r(1:3) = r_old(1:3, iunit)
+         ENDDO
+      ENDIF
+
+      DEALLOCATE(r)
+      CALL timestop(handle)
+   END SUBROUTINE
 
 ! **************************************************************************************************
 !> \brief performs a proton transfer move

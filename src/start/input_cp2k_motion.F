@@ -471,7 +471,7 @@ CONTAINS
 
       CALL section_create(section, __LOCATION__, name="move_probabilities", &
                           description="Parameters for fraction of moves performed for each move type.", &
-                          n_keywords=6, n_subsections=2, repeats=.FALSE.)
+                          n_keywords=7, n_subsections=2, repeats=.FALSE.)
 
       NULLIFY (keyword, subsection)
 
@@ -530,7 +530,14 @@ CONTAINS
                           type_of_var=real_t, default_r_val=0.0E0_dp)
       CALL section_add_keyword(section, keyword)
       CALL keyword_release(keyword)
-      
+
+      CALL keyword_create(keyword, __LOCATION__, name="PMBOND_EXC", &
+                          description="The probability of exchanging bonds in a OH3.", &
+                          usage="PMBOND_EXC {real}", &
+                          type_of_var=real_t, default_r_val=0.0E0_dp)
+      CALL section_add_keyword(section, keyword)
+      CALL keyword_release(keyword)
+
       CALL create_mol_prob_section(subsection)
       CALL section_add_subsection(section, subsection)
       CALL section_release(subsection)

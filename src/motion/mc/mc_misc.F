@@ -129,7 +129,7 @@ CONTAINS
       REAL(dp), DIMENSION(:), POINTER                    :: rmangle, rmbond, rmdihedral, rmrot, &
                                                             rmtrans
       REAL(KIND=dp)                                      :: pmcltrans, pmswap, pmproton, &
-                                                            rmcltrans, rmvolume
+                                                            pmbond_exc, rmcltrans, rmvolume
       TYPE(mc_molecule_info_type), POINTER               :: mc_molecule_info
       TYPE(mc_moves_type), POINTER                       :: moves
 
@@ -139,7 +139,7 @@ CONTAINS
 
       NULLIFY (mc_molecule_info, rmbond, rmangle, rmdihedral, rmrot, rmtrans)
 
-      CALL get_mc_par(mc_par, pmswap=pmswap, pmproton=pmproton, rmvolume=rmvolume, &
+      CALL get_mc_par(mc_par, pmswap=pmswap, pmproton=pmproton, pmbond_exc=pmbond_exc, rmvolume=rmvolume, &
                       lbias=lbias, rmbond=rmbond, rmangle=rmangle, rmdihedral=rmdihedral, &
                       rmtrans=rmtrans, rmcltrans=rmcltrans, pmcltrans=pmcltrans, rmrot=rmrot, &
                       mc_molecule_info=mc_molecule_info)
@@ -181,6 +181,12 @@ CONTAINS
           string1 = "Proton Transfer Moves"
           CALL final_move_write(all_moves(1)%moves%proton_transfer, string1, string2, iw)
       ENDIF              
+
+      IF (pmbond_exc .GT. 0.0E0_dp) THEN
+          string2 = "Attempted       Accepted       Percent"
+          string1 = "Bond Exchange Moves"
+          CALL final_move_write(all_moves(1)%moves%bond_exc, string1, string2, iw)
+      ENDIF
 
       IF (pmcltrans .GT. 0.0E0_dp) THEN
 
