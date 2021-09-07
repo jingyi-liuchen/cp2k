@@ -35,7 +35,8 @@ MODULE mc_coordinates
 
    PRIVATE
 
-   PRIVATE :: generate_avbmc_insertion
+   PRIVATE :: generate_avbmc_insertion, &
+              find_all_paths_util
 
    PUBLIC :: generate_cbmc_swap_config, &
              get_center_of_mass, mc_coordinate_fold, &
@@ -44,7 +45,10 @@ MODULE mc_coordinates
              check_for_overlap, &
              rotate_molecule, &
              cluster_search, &
-             create_inout_list
+             create_inout_list, &
+             build_HB_graph, &
+             breath_first_search, &
+             find_all_paths
 
    CHARACTER(len=*), PARAMETER, PRIVATE :: moduleN = 'mc_coordinates'
 
@@ -1290,6 +1294,216 @@ CONTAINS
       ENDDO
 
       CALL timestop(handle)
+
+   END SUBROUTINE
+
+!> \generate graph based on hydrogen bond criteria
+!> \OO_dist max OO distance
+!> \OHO_angle minimum OHO angle
+   SUBROUTINE build_HB_graph(nchain, nunits, mol_type, particles, abc, &
+                          nedges, edges, adjmat, OO_dist, OHO_angle)
+      INTEGER, INTENT(IN)                                :: nchain
+      INTEGER, DIMENSION(:), INTENT(IN)                  :: nunits, mol_type
+      TYPE(particle_list_type), POINTER                  :: particles
+      REAL(KIND=dp), DIMENSION(1:3), INTENT(IN)          :: abc
+      INTEGER, INTENT(OUT)                               :: nedges
+      INTEGER, DIMENSION(:, :), INTENT(OUT)              :: edges, adjmat
+      REAL(KIND=dp), INTENT(IN)                          :: OO_dist, OHO_angle
+
+      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :)     :: r
+      REAL(KIND=dp), DIMENSION(3)                        :: OO, iOH, jOH
+      REAL(KIND=dp)                                      :: OO_distsq, cos_OHO_angle, &
+                                                            drOOsq, drOO, iOH_len, jOH_len, &
+                                                            cos_angle
+      INTEGER                                            :: imol, jmol, iunit, junit
+
+      ALLOCATE (r(1:3, 1:MAXVAL(nunits), 1:nchain))
+      junit = 0
+      DO imol = 1, nchain
+         DO iunit = 1, nunits(mol_type(imol))
+            junit = junit + 1
+            r(1:3, iunit, imol) = particles%els(junit)%r(1:3)
+         ENDDO
+      ENDDO
+
+      OO_distsq = OO_dist * OO_dist
+      cos_OHO_angle = COS(OHO_angle/180.0_dp*pi)
+
+      nedges = 0
+      DO imol = 1, nchain
+          DO jmol = 1, nchain
+              adjmat(jmol, imol) = 0
+          ENDDO
+      ENDDO
+
+      DO imol = 1, nchain-1
+         DO jmol = imol + 1, nchain
+            OO = r(:, 1, imol) - r(:, 1, jmol)
+            OO = OO - ANINT(OO/abc)*abc
+            drOOsq = DOT_PRODUCT(OO, OO)
+            IF (drOOsq .LE. OO_distsq) THEN
+               ! imol is donor
+               DO iunit = 2, nunits(mol_type(imol))
+                  iOH = r(:, iunit, imol) - r(:, 1, imol)
+                  jOH = r(:, iunit, imol) - r(:, 1, jmol)
+                  iOH = iOH - ANINT(iOH/abc)*abc
+                  jOH = jOH - ANINT(jOH/abc)*abc
+                  iOH_len = SQRT(DOT_PRODUCT(iOH, iOH))
+                  jOH_len = SQRT(DOT_PRODUCT(jOH, jOH))
+                  cos_angle = DOT_PRODUCT(iOH, jOH)/iOH_len/jOH_len
+                  IF (cos_angle .LE. cos_OHO_angle) THEN
+                     !WRITE(*,*) 'imol jmol ', imol, jmol
+                     !WRITE(*,*)  SQRT(drOOsq)*angstrom, iOH_len*angstrom, jOH_len*angstrom, ACOS(cos_angle)/pi*180.0
+                     nedges = nedges + 1
+                     edges(1, nedges) = imol
+                     edges(2, nedges) = jmol
+                     edges(3, nedges) = iunit
+                     adjmat(jmol, imol) = 1 !outgoing edge from imol to jmol
+                     EXIT
+                  ENDIF
+               ENDDO
+
+               ! jmol is donor
+               DO junit = 2, nunits(mol_type(jmol))
+                  iOH = r(:, junit, jmol) - r(:, 1, imol)
+                  jOH = r(:, junit, jmol) - r(:, 1, jmol)
+                  iOH = iOH - ANINT(iOH/abc)*abc
+                  jOH = jOH - ANINT(jOH/abc)*abc
+                  iOH_len = SQRT(DOT_PRODUCT(iOH, iOH))
+                  jOH_len = SQRT(DOT_PRODUCT(jOH, jOH))
+                  cos_angle = DOT_PRODUCT(iOH, jOH)/iOH_len/jOH_len
+                  IF (cos_angle .LE. cos_OHO_angle) THEN
+                     !WRITE(*,*) 'imol jmol ', imol, jmol
+                     !WRITE(*,*)  SQRT(drOOsq)*angstrom, iOH_len*angstrom, jOH_len*angstrom, ACOS(cos_angle)/pi*180.0
+                     nedges = nedges + 1
+                     edges(1, nedges) = jmol
+                     edges(2, nedges) = imol
+                     edges(3, nedges) = junit
+                     adjmat(imol, jmol) = 1 !outgoing edge from imol to jmol
+                     EXIT
+                  ENDIF
+               ENDDO
+            ENDIF
+         ENDDO
+      ENDDO
+
+      DEALLOCATE(r)
+   END SUBROUTINE
+
+!> \DO a BFS on a graph represented by adjacent matrix
+!> \start_mol: source vertex
+!> \member_list: molecules in the cluster
+   SUBROUTINE breath_first_search(adjmat, nchain, start_mol, max_depth, nmember, member_list)
+      INTEGER, DIMENSION(:, :), INTENT(IN)              :: adjmat
+      INTEGER, INTENT(IN)                               :: nchain, start_mol, max_depth
+      INTEGER, INTENT(OUT)                              :: nmember
+      INTEGER, DIMENSION(:), INTENT(OUT)                :: member_list
+
+      INTEGER, DIMENSION(:), ALLOCATABLE                :: visited
+      INTEGER, DIMENSION(1:1000)                        :: queue, depth_queue
+      INTEGER                                           :: ncount, depth, i, j
+
+      ALLOCATE(visited(1:nchain))
+
+      visited(1:nchain) = 0
+      visited(start_mol) = 1
+
+      queue(1) = start_mol
+      depth_queue(1) = 0
+
+      ! number of elements in the queue
+      ncount = 1
+      nmember = 1
+      member_list(1) = start_mol
+
+      DO WHILE (ncount .NE. 0)
+          i = queue(1)
+          depth = depth_queue(1)
+          IF (depth .EQ. max_depth) EXIT
+
+          queue = queue(2:ncount)
+          depth_queue = depth_queue(2:ncount)
+          ncount = ncount - 1
+          DO j = 1, nchain
+              IF(adjmat(j, i) .EQ. 1 .AND. visited(j) .EQ. 0) THEN
+                  visited(j) = 1
+                  ncount = ncount + 1
+                  queue(ncount) = j
+                  depth_queue(ncount) = depth + 1
+                  nmember = nmember + 1
+                  member_list(nmember) = j
+              ENDIF
+          ENDDO
+      END DO
+
+      DEALLOCATE(visited)
+   END SUBROUTINE
+
+   SUBROUTINE find_all_paths(adjmat, nchain, start_mol, target_mol, max_depth, ncount_path, all_paths)
+      INTEGER, DIMENSION(:, :), INTENT(IN)              :: adjmat
+      INTEGER, INTENT(IN)                               :: nchain, target_mol,  max_depth
+      INTEGER, INTENT(INOUT)                            :: start_mol, ncount_path
+      INTEGER, DIMENSION(:, :), INTENT(INOUT)           :: all_paths
+      INTEGER, DIMENSION(:), ALLOCATABLE                :: visited, path
+
+      INTEGER                                           :: path_index
+
+      ALLOCATE(visited(1:nchain), path(1:nchain))
+
+      visited(1:nchain) = 0
+
+      path_index = 0
+
+      CALL find_all_paths_util(adjmat, nchain, start_mol, target_mol, max_depth, ncount_path, all_paths, &
+                               visited, path_index, path)
+
+      DEALLOCATE(visited, path)
+   END SUBROUTINE
+ 
+   RECURSIVE SUBROUTINE find_all_paths_util(adjmat, nchain, start_mol, target_mol, max_depth, ncount_path, all_paths, &
+                                            visited, path_index, path)
+
+      INTEGER, DIMENSION(:, :), INTENT(IN)              :: adjmat
+      INTEGER, INTENT(IN)                               :: nchain, target_mol,  max_depth
+      INTEGER, DIMENSION(:), INTENT(INOUT)              :: visited, path
+      INTEGER, INTENT(INOUT)                            :: start_mol, path_index, ncount_path
+      INTEGER, DIMENSION(:, :), INTENT(INOUT)           :: all_paths
+
+      INTEGER                                           :: i, j
+
+      !WRITE(*, *) 'start_mol, target_mol, path_index: ', start_mol, target_mol, path_index
+
+      path_index = path_index + 1
+
+      IF (path_index .GT. (max_depth+1)) THEN
+         path_index = path_index - 1
+         visited(start_mol) = 0
+         RETURN
+      ENDIF
+
+      visited(start_mol) = 1
+      path(path_index) = start_mol
+
+      IF (start_mol .EQ. target_mol) THEN
+         !WRITE(*, *) 'found path'
+         !DO i = 1, path_index
+         !   WRITE(*, *) path(i)
+         !END DO
+         ncount_path = ncount_path + 1
+         all_paths(1, ncount_path) = path_index
+         all_paths(2:path_index+1, ncount_path) = path(1:path_index)
+      ELSE
+         DO i = 1, nchain
+            IF (adjmat(i, start_mol) .EQ. 1 .AND. visited(i) .EQ. 0) THEN
+              !WRITE(*, *) 'neighbor ', i
+              CALL find_all_paths_util(adjmat, nchain, i, target_mol, max_depth, ncount_path, all_paths, &
+                        visited, path_index, path)
+            END IF
+         ENDDO
+      ENDIF
+
+      path_index = path_index - 1
+      visited(start_mol) = 0
 
    END SUBROUTINE
 
