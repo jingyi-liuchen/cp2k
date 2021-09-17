@@ -97,6 +97,7 @@ MODULE mc_types
       INTEGER :: source
       INTEGER :: group
       INTEGER :: iprint
+      INTEGER :: max_hop
       LOGICAL :: ldiscrete
       LOGICAL :: lbias
       LOGICAL :: ionode
@@ -393,7 +394,7 @@ CONTAINS
                          pmbond_exc, pmvolume, pmtraion, pmtrans, &
                          pmcltrans, ensemble, PROGRAM, restart_file_name, molecules_file, moves_file, coords_file, &
                          energy_file, displacement_file, cell_file, dat_file, data_file, box2_file, &
-                         fft_lib, iprint, rcut, ldiscrete, discrete_step, &
+                         fft_lib, iprint, max_hop, rcut, ldiscrete, discrete_step, &
                          pmavbmc, avbmc_method, pbias, pbias2, pmtarget_mol, avbmc_atom, avbmc_rmin, avbmc_rmax, rmdihedral, &
                          input_file, mc_molecule_info, pmswap_mol, pmavbmc_mol, pmtrans_mol, pmrot_mol, &
                          pmtraion_mol, mc_input_file, mc_bias_file, pmvol_box, pmclus_box, virial_temps, &
@@ -408,7 +409,7 @@ CONTAINS
       TYPE(mc_simpar_type), POINTER                      :: mc_par
       INTEGER, INTENT(OUT), OPTIONAL                     :: nstep, nvirial, iuptrans, iupcltrans, &
                                                             iupvolume, nmoves, nswapmoves, rm, cl, &
-                                                            diff, nstart, source, group
+                                                            diff, nstart, source, group, max_hop
       LOGICAL, INTENT(OUT), OPTIONAL                     :: lbias, ionode, lrestart, lstop
       REAL(KIND=dp), INTENT(OUT), OPTIONAL               :: rmvolume, rmcltrans
       REAL(KIND=dp), DIMENSION(:), OPTIONAL, POINTER     :: rmbond, rmangle, rmrot, rmtrans
@@ -457,6 +458,7 @@ CONTAINS
       IF (PRESENT(group)) group = mc_par%group
       IF (PRESENT(iprint)) iprint = mc_par%iprint
       IF (PRESENT(avbmc_method)) avbmc_method = mc_par%avbmc_method
+      IF (PRESENT(max_hop)) max_hop = mc_par%max_hop
 
       IF (PRESENT(lbias)) lbias = mc_par%lbias
       IF (PRESENT(ionode)) ionode = mc_par%ionode
@@ -660,7 +662,7 @@ CONTAINS
                          diff, nstart, rmvolume, rmcltrans, rmbond, rmangle, rmdihedral, rmrot, rmtrans, PROGRAM, &
                          nmoves, nswapmoves, lstop, temperature, pressure, rmin, rclus, iuptrans, iupcltrans, iupvolume, &
                          pmswap, pmproton, pmbond_exc, &
-                         pmvolume, pmtraion, pmtrans, pmcltrans, BETA, rcut, iprint, lbias, nstep, &
+                         pmvolume, pmtraion, pmtrans, pmcltrans, BETA, rcut, iprint, max_hop, lbias, nstep, &
                          lrestart, ldiscrete, discrete_step, pmavbmc, mc_molecule_info, &
                          pmavbmc_mol, pmtrans_mol, pmrot_mol, pmtraion_mol, pmswap_mol, &
                          avbmc_method, avbmc_rmin, avbmc_rmax, avbmc_atom, pbias, pbias2, pmtarget_mol, &
@@ -687,7 +689,7 @@ CONTAINS
       REAL(KIND=dp), INTENT(IN), OPTIONAL                :: pmswap, pmproton, pmbond_exc, &
                                                             pmvolume, pmtraion, pmtrans, &
                                                             pmcltrans, BETA, rcut
-      INTEGER, INTENT(IN), OPTIONAL                      :: iprint
+      INTEGER, INTENT(IN), OPTIONAL                      :: iprint, max_hop
       LOGICAL, INTENT(IN), OPTIONAL                      :: lbias
       INTEGER, INTENT(IN), OPTIONAL                      :: nstep
       LOGICAL, INTENT(IN), OPTIONAL                      :: lrestart, ldiscrete
@@ -725,6 +727,7 @@ CONTAINS
       IF (PRESENT(iupcltrans)) mc_par%iupcltrans = iupcltrans
       IF (PRESENT(iupvolume)) mc_par%iupvolume = iupvolume
       IF (PRESENT(avbmc_method)) mc_par%avbmc_method = avbmc_method
+      IF (PRESENT(max_hop)) mc_par%max_hop = max_hop
 
       IF (PRESENT(ldiscrete)) mc_par%ldiscrete = ldiscrete
       IF (PRESENT(lstop)) mc_par%lstop = lstop
@@ -1344,6 +1347,7 @@ CONTAINS
       CALL section_vals_val_get(mc_section, "MOVE_UPDATES%IUPCLTRANS", &
                                 i_val=mc_par%iupcltrans)
       CALL section_vals_val_get(mc_section, "IPRINT", i_val=mc_par%iprint)
+      CALL section_vals_val_get(mc_section, "MAX_HOP", i_val=mc_par%max_hop)
 ! now an integer array
       CALL section_vals_val_get(mc_section, "AVBMC%AVBMC_ATOM", i_vals=temp_i_array)
       
@@ -1624,6 +1628,8 @@ CONTAINS
             mc_par%iupcltrans
          WRITE (iw, '( A,T71,I10 )') ' MC| iprint ', &
             mc_par%iprint
+         WRITE (iw, '( A,T71,I10 )') ' MC| max_hop ', &
+            mc_par%max_hop
          WRITE (iw, '( A,T61,A20 )') ' MC| ensemble ', &
             ADJUSTR(mc_par%ensemble)
 ! format string may not be valid if all the molecules are atomic,

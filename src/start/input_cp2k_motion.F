@@ -164,7 +164,7 @@ CONTAINS
       CPASSERT(.NOT. ASSOCIATED(section))
       CALL section_create(section, __LOCATION__, name="mc", &
                           description="This section sets parameters to set up a MonteCarlo calculation.", &
-                          n_keywords=11, n_subsections=2, repeats=.FALSE.)
+                          n_keywords=12, n_subsections=2, repeats=.FALSE.)
 
       NULLIFY (keyword, subsection)
 
@@ -235,6 +235,13 @@ CONTAINS
                           description="Read initial configuration from restart file.", &
                           usage="RESTART {logical}", &
                           default_l_val=.FALSE.)
+      CALL section_add_keyword(section, keyword)
+      CALL keyword_release(keyword)
+
+      CALL keyword_create(keyword, __LOCATION__, name="MAX_HOP", &
+                          description="Specifies the number of maximum hops in proton transfer.", &
+                          usage="MAX_HOP {integer}", &
+                          default_i_val=3)
       CALL section_add_keyword(section, keyword)
       CALL keyword_release(keyword)
 
