@@ -1393,9 +1393,9 @@ CONTAINS
 !> \DO a BFS on a graph represented by adjacent matrix
 !> \start_mol: source vertex
 !> \member_list: molecules in the cluster
-   SUBROUTINE breath_first_search(adjmat, nchain, start_mol, max_depth, nmember, member_list)
+   SUBROUTINE breath_first_search(adjmat, nchain, start_mol, max_hop, nmember, member_list)
       INTEGER, DIMENSION(:, :), INTENT(IN)              :: adjmat
-      INTEGER, INTENT(IN)                               :: nchain, start_mol, max_depth
+      INTEGER, INTENT(IN)                               :: nchain, start_mol, max_hop
       INTEGER, INTENT(OUT)                              :: nmember
       INTEGER, DIMENSION(:), INTENT(OUT)                :: member_list
 
@@ -1419,7 +1419,7 @@ CONTAINS
       DO WHILE (ncount .NE. 0)
           i = queue(1)
           depth = depth_queue(1)
-          IF (depth .EQ. max_depth) EXIT
+          IF (depth .EQ. max_hop) EXIT
 
           queue = queue(2:ncount)
           depth_queue = depth_queue(2:ncount)
@@ -1439,9 +1439,9 @@ CONTAINS
       DEALLOCATE(visited)
    END SUBROUTINE
 
-   SUBROUTINE find_all_paths(adjmat, nchain, start_mol, target_mol, max_depth, ncount_path, all_paths)
+   SUBROUTINE find_all_paths(adjmat, nchain, start_mol, target_mol, max_hop, ncount_path, all_paths)
       INTEGER, DIMENSION(:, :), INTENT(IN)              :: adjmat
-      INTEGER, INTENT(IN)                               :: nchain, target_mol,  max_depth
+      INTEGER, INTENT(IN)                               :: nchain, target_mol,  max_hop
       INTEGER, INTENT(INOUT)                            :: start_mol, ncount_path
       INTEGER, DIMENSION(:, :), INTENT(INOUT)           :: all_paths
       INTEGER, DIMENSION(:), ALLOCATABLE                :: visited, path
@@ -1454,17 +1454,17 @@ CONTAINS
 
       path_index = 0
 
-      CALL find_all_paths_util(adjmat, nchain, start_mol, target_mol, max_depth, ncount_path, all_paths, &
+      CALL find_all_paths_util(adjmat, nchain, start_mol, target_mol, max_hop, ncount_path, all_paths, &
                                visited, path_index, path)
 
       DEALLOCATE(visited, path)
    END SUBROUTINE
  
-   RECURSIVE SUBROUTINE find_all_paths_util(adjmat, nchain, start_mol, target_mol, max_depth, ncount_path, all_paths, &
+   RECURSIVE SUBROUTINE find_all_paths_util(adjmat, nchain, start_mol, target_mol, max_hop, ncount_path, all_paths, &
                                             visited, path_index, path)
 
       INTEGER, DIMENSION(:, :), INTENT(IN)              :: adjmat
-      INTEGER, INTENT(IN)                               :: nchain, target_mol,  max_depth
+      INTEGER, INTENT(IN)                               :: nchain, target_mol,  max_hop
       INTEGER, DIMENSION(:), INTENT(INOUT)              :: visited, path
       INTEGER, INTENT(INOUT)                            :: start_mol, path_index, ncount_path
       INTEGER, DIMENSION(:, :), INTENT(INOUT)           :: all_paths
@@ -1475,7 +1475,7 @@ CONTAINS
 
       path_index = path_index + 1
 
-      IF (path_index .GT. (max_depth+1)) THEN
+      IF (path_index .GT. (max_hop+1)) THEN
          path_index = path_index - 1
          visited(start_mol) = 0
          RETURN
@@ -1485,18 +1485,13 @@ CONTAINS
       path(path_index) = start_mol
 
       IF (start_mol .EQ. target_mol) THEN
-         !WRITE(*, *) 'found path'
-         !DO i = 1, path_index
-         !   WRITE(*, *) path(i)
-         !END DO
          ncount_path = ncount_path + 1
          all_paths(1, ncount_path) = path_index
          all_paths(2:path_index+1, ncount_path) = path(1:path_index)
       ELSE
          DO i = 1, nchain
             IF (adjmat(i, start_mol) .EQ. 1 .AND. visited(i) .EQ. 0) THEN
-              !WRITE(*, *) 'neighbor ', i
-              CALL find_all_paths_util(adjmat, nchain, i, target_mol, max_depth, ncount_path, all_paths, &
+              CALL find_all_paths_util(adjmat, nchain, i, target_mol, max_hop, ncount_path, all_paths, &
                         visited, path_index, path)
             END IF
          ENDDO

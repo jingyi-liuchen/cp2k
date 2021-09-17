@@ -2204,7 +2204,7 @@ CONTAINS
       CHARACTER, DIMENSION(10)                           :: OH3_names 
       INTEGER                                            :: source, group, handle, &
                                                             i, j, nmol_types, nchain, &
-                                                            max_depth, max_npaths, &
+                                                            max_hop, max_npaths, &
                                                             nedges, nedges2, nmember, &
                                                             nmember2, start_mol, target_mol, &
                                                             ncount_path, ncount_path2, &
@@ -2239,6 +2239,7 @@ CONTAINS
                       BETA=BETA, max_val=max_val, min_val=min_val, exp_max_val=exp_max_val, &
                       exp_min_val=exp_min_val, &
                       ionode=ionode, source=source, &
+                      max_hop=max_hop, &
                       group=group, mc_molecule_info=mc_molecule_info)
       CALL get_mc_molecule_info(mc_molecule_info, nmol_types=nmol_types, nchains=nchains, nunits=nunits, &
                                 nunits_tot=nunits_tot, mol_type=mol_type)
@@ -2251,7 +2252,6 @@ CONTAINS
 
       ! hard_coded variables
       start_mol = 1
-      max_depth = 4
       max_npaths = 100
       OO_dist = 3.3_dp/angstrom
       OHO_angle = 120.0_dp
@@ -2259,16 +2259,16 @@ CONTAINS
       ! allocate data structures to represent graph
       nchain = SUM(nchains(:, box_number))
       ALLOCATE(edges(1:3, 1:nchain*nchain), adjmat(1:nchain, 1:nchain), member_list(1:nchain), &
-               path(1:nchain), all_paths(max_depth+2, max_npaths), &
+               path(1:nchain), all_paths(max_hop+2, max_npaths), &
                edges2(1:3, 1:nchain*nchain), adjmat2(1:nchain, 1:nchain), member_list2(1:nchain), &
-               path2(1:nchain), all_paths2(max_depth+2, max_npaths))
+               path2(1:nchain), all_paths2(max_hop+2, max_npaths))
 
       ! build a list of edges and adjacency matrix
       CALL build_HB_graph(nchain, nunits, mol_type, particles, abc, &
                          nedges, edges, adjmat, OO_dist, OHO_angle)
 
-      ! find nodes that are max_depth hops away from start mol
-      CALL breath_first_search(adjmat, nchain, start_mol, max_depth, nmember, member_list)
+      ! find nodes that are max_hop hops away from start mol
+      CALL breath_first_search(adjmat, nchain, start_mol, max_hop, nmember, member_list)
 
       IF (nmember .EQ. 1) THEN
          IF (ionode) THEN
@@ -2300,16 +2300,16 @@ CONTAINS
          WRITE(*, *) 'target mol: ', target_mol
       ENDIF
 
-      ! find all paths between start mol and target mol with max number of hops equal max_depth
+      ! find all paths between start mol and target mol with max number of hops equal max_hop
       ncount_path = 0
-      CALL find_all_paths(adjmat, nchain, start_mol, target_mol, max_depth, ncount_path, all_paths)
+      CALL find_all_paths(adjmat, nchain, start_mol, target_mol, max_hop, ncount_path, all_paths)
 
       IF (ncount_path .LE. 0) THEN
           CPABORT('No forward path found!')
       ENDIF
 
       IF (ionode) THEN
-         WRITE(*, *) 'max number of hops: ', max_depth
+         WRITE(*, *) 'max number of hops: ', max_hop
          WRITE(*, *) 'number of paths: ' , ncount_path
          DO i = 1, ncount_path
             length = all_paths(1, i)
@@ -2347,6 +2347,10 @@ CONTAINS
                END DO        
             ENDIF
          END DO
+         WRITE(*,*) 'old config'
+         DO i = 1, SIZE(particles%els)
+            WRITE(*,*) particles%els(i)%r(1:3)*angstrom
+         ENDDO
       ENDIF
 
       ! flip the H of internal O
@@ -2476,6 +2480,10 @@ CONTAINS
                END DO
             ENDIF
          END DO
+         WRITE(*,*) 'new config'
+         DO i = 1, SIZE(particles%els)
+            WRITE(*,*) particles%els(i)%r(1:3)*angstrom
+         ENDDO
       ENDIF
       
       ! just in case we will check for overlap
@@ -2513,7 +2521,7 @@ CONTAINS
          ENDIF
       ENDIF
 
-      CALL breath_first_search(adjmat2, nchain, start_mol, max_depth, nmember2, member_list2)
+      CALL breath_first_search(adjmat2, nchain, start_mol, max_hop, nmember2, member_list2)
       IF (ionode) THEN
          WRITE(*, *) 'nmember2: ', nmember2
          !WRITE(*, *) 'member_list2: ', member_list2(1:nmember2)
@@ -2534,7 +2542,7 @@ CONTAINS
 
       ! find all paths between start mol and target mol
       ncount_path2 = 0
-      CALL find_all_paths(adjmat2, nchain, start_mol, target_mol, max_depth, ncount_path2, all_paths2)
+      CALL find_all_paths(adjmat2, nchain, start_mol, target_mol, max_hop, ncount_path2, all_paths2)
       IF (ncount_path2 .LE. 0) THEN
           CPABORT('No forward path found!')
       ENDIF
