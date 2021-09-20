@@ -3421,6 +3421,7 @@ CONTAINS
 
       CHARACTER(LEN=*), PARAMETER                        :: routineN = 'mc_hmc_move'
 
+      CHARACTER(LEN=2)                                   :: element_symbol
       INTEGER                                            :: group, handle, iatom, source, &
                                                             nmol_types, start_mol, end_mol, jbox
       INTEGER, DIMENSION(:), POINTER                     :: mol_type, nunits, nunits_tot
@@ -3475,18 +3476,31 @@ CONTAINS
          r(1:3, iatom) = particles_old%els(iatom)%r(1:3)
       ENDDO
 
+      IF (ionode) THEN
+         WRITE(*,*) 'Before HMC'
+         DO iatom = 1, SIZE(particles_old%els)
+            CALL get_atomic_kind(atomic_kind=particles_old%els(iatom)%atomic_kind, &
+                                 element_symbol=element_symbol)
+            WRITE(*,*) element_symbol, particles_old%els(iatom)%r(1:3)*angstrom
+         ENDDO
+      ENDIF
+
 ! now run the MD simulation
       CALL qs_mol_dyn(force_env, globenv, hmc_e_initial=hmc_ekin%initial_ekin, hmc_e_final=hmc_ekin%final_ekin)
 
       CALL check_for_overlap(force_env, nchains(:, box_number), &
                              nunits(:), loverlap, mol_type(start_mol:end_mol), rmin)
 
+      IF (ionode) THEN
+         WRITE(*,*) 'After HMC'
+         DO iatom = 1, SIZE(particles_old%els)
+            CALL get_atomic_kind(atomic_kind=particles_old%els(iatom)%atomic_kind, &
+                                 element_symbol=element_symbol)
+            WRITE(*,*) element_symbol, particles_old%els(iatom)%r(1:3)*angstrom
+         ENDDO
+      ENDIF
+
       IF (loverlap) THEN
-         IF (ionode) THEN
-            DO iatom = 1, SIZE(particles_old%els)
-               WRITE(*,*) particles_old%els(iatom)%r(1:3)*angstrom
-            ENDDO
-         ENDIF
          CPABORT('Overlap after hybrid MD move')
       ENDIF
 
