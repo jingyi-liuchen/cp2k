@@ -3413,12 +3413,15 @@ CONTAINS
 
       CHARACTER(LEN=*), PARAMETER                        :: routineN = 'mc_hmc_move'
 
-      INTEGER                                            :: group, handle, iatom, source
-      INTEGER, DIMENSION(:), POINTER                     :: nunits_tot
-      LOGICAL                                            :: ionode
-      REAL(KIND=dp)                                      :: BETA, energy_term, exp_max_val, &
+      INTEGER                                            :: group, handle, iatom, source, &
+                                                            nmol_types, start_mol, end_mol, jbox
+      INTEGER, DIMENSION(:), POINTER                     :: mol_type, nunits, nunits_tot
+      LOGICAL                                            :: ionode, loverlap
+      REAL(KIND=dp)                                      :: BETA, energy_term, exp_max_val, rmin, &
                                                             exp_min_val, new_energy, rand, value, w
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: r
+      REAL(dp), DIMENSION(:, :), POINTER                 :: mass
+      INTEGER, DIMENSION(:, :), POINTER                  :: nchains
       TYPE(cp_subsys_type), POINTER                      :: oldsys
       TYPE(mc_ekin_type), POINTER                        :: hmc_ekin
       TYPE(mc_molecule_info_type), POINTER               :: mc_molecule_info
@@ -3433,7 +3436,16 @@ CONTAINS
                       BETA=BETA, exp_max_val=exp_max_val, &
                       exp_min_val=exp_min_val, source=source, group=group, &
                       mc_molecule_info=mc_molecule_info)
-      CALL get_mc_molecule_info(mc_molecule_info, nunits_tot=nunits_tot)
+
+      CALL get_mc_molecule_info(mc_molecule_info, nmol_types=nmol_types, nchains=nchains, &
+             mass=mass, nunits=nunits, nunits_tot=nunits_tot, mol_type=mol_type)
+
+! figure out some bounds for mol_type
+      start_mol = 1
+      DO jbox = 1, box_number - 1
+         start_mol = start_mol + SUM(nchains(:, jbox))
+      ENDDO
+      end_mol = start_mol + SUM(nchains(:, box_number)) - 1
 
 ! nullify some pointers
       NULLIFY (particles_old, oldsys, hmc_ekin)
@@ -3457,6 +3469,18 @@ CONTAINS
 
 ! now run the MD simulation
       CALL qs_mol_dyn(force_env, globenv, hmc_e_initial=hmc_ekin%initial_ekin, hmc_e_final=hmc_ekin%final_ekin)
+
+      CALL check_for_overlap(force_env, nchains(:, box_number), &
+                             nunits(:), loverlap, mol_type(start_mol:end_mol), rmin)
+
+      IF (loverlap) THEN
+         IF (ionode) THEN
+            DO iatom = 1, SIZE(particles_old%els)
+               WRITE(*,*) particles_old%els(iatom)%r(1:3)*angstrom
+            ENDDO
+         ENDIF
+         CPABORT('Overlap after hybrid MD move')
+      ENDIF
 
 ! get the energy
       CALL force_env_get(force_env, &
